@@ -87,6 +87,25 @@ export class DuckDBKnowledgeGraphManager
   }
 
   /**
+   * Clean up the DuckDB instance
+   * @private
+   */
+  private async cleanupInstance(): Promise<void> {
+    if (this.instance) {
+      try {
+        // Execute CHECKPOINT to ensure data is written to disk
+        const conn = await this.instance.connect();
+        await conn.run("CHECKPOINT");
+        conn.close();
+      } catch (error) {
+        this.logger.error("Error during checkpoint", extractError(error));
+      }
+    }
+    this.instance = null as any;
+    this.initialized = false;
+  }
+
+  /**
    * Initialize the database
    * @private
    */
@@ -244,6 +263,9 @@ export class DuckDBKnowledgeGraphManager
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
 
+      // Clean up instance after operation
+      await this.cleanupInstance();
+      
       return createdEntities;
     } catch (error: unknown) {
       // Rollback in case of error
@@ -318,6 +340,9 @@ export class DuckDBKnowledgeGraphManager
       // Commit transaction
       await conn.execute("COMMIT");
 
+      // Clean up instance after operation
+      await this.cleanupInstance();
+      
       return newRelations;
     } catch (error: unknown) {
       // Rollback in case of error
@@ -397,6 +422,9 @@ export class DuckDBKnowledgeGraphManager
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
 
+      // Clean up instance after operation
+      await this.cleanupInstance();
+      
       return addedObservations;
     } catch (error: unknown) {
       // Rollback in case of error
@@ -450,6 +478,9 @@ export class DuckDBKnowledgeGraphManager
       // Update Fuse.js index
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
+      
+      // Clean up instance after operation
+      await this.cleanupInstance();
     } catch (error: unknown) {
       this.logger.error("Error deleting entities", extractError(error));
       throw error;
@@ -486,6 +517,9 @@ export class DuckDBKnowledgeGraphManager
       // Update Fuse.js index
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
+      
+      // Clean up instance after operation
+      await this.cleanupInstance();
     } catch (error: unknown) {
       // Rollback in case of error
       await conn.execute("ROLLBACK");
@@ -515,6 +549,9 @@ export class DuckDBKnowledgeGraphManager
 
       // Commit transaction
       await conn.execute("COMMIT");
+      
+      // Clean up instance after operation
+      await this.cleanupInstance();
     } catch (error: unknown) {
       // Rollback in case of error
       await conn.execute("ROLLBACK");
@@ -529,66 +566,76 @@ export class DuckDBKnowledgeGraphManager
    * @returns Knowledge graph with matching entities and their relations
    */
   async searchNodes(query: string): Promise<KnowledgeGraph> {
-    if (!query || query.trim() === "") {
-      return { entities: [], relations: [] };
-    }
-
-    // Get all entities
-    const allEntities = await this.getAllEntities();
-
-    // Update Fuse.js collection
-    this.fuse.setCollection(allEntities);
-
-    // Execute search
-    const results = this.fuse.search(query);
-
-    // Extract entities from search results (remove duplicates)
-    const uniqueEntities = new Map<string, Entity>();
-    for (const result of results) {
-      if (!uniqueEntities.has(result.item.name)) {
-        uniqueEntities.set(result.item.name, result.item);
+    try {
+      if (!query || query.trim() === "") {
+        return { entities: [], relations: [] };
       }
-    }
 
-    const entities = Array.from(uniqueEntities.values());
+      // Get all entities
+      const allEntities = await this.getAllEntities();
 
-    // Create a set of entity names
-    const entityNames = entities.map((entity) => entity.name);
+      // Update Fuse.js collection
+      this.fuse.setCollection(allEntities);
 
-    if (entityNames.length === 0) {
-      return { entities: [], relations: [] };
-    }
+      // Execute search
+      const results = this.fuse.search(query);
 
-    // Create placeholders
-    const placeholders = entityNames.map(() => "?").join(",");
+      // Extract entities from search results (remove duplicates)
+      const uniqueEntities = new Map<string, Entity>();
+      for (const result of results) {
+        if (!uniqueEntities.has(result.item.name)) {
+          uniqueEntities.set(result.item.name, result.item);
+        }
+      }
 
-    using conn = await this.getConn();
+      const entities = Array.from(uniqueEntities.values());
 
-    // Get related relations
-    const relationsReader = await conn.executeAndReadAll(
-      `
-      SELECT from_entity as "from", to_entity as "to", relationType
-      FROM relations
-      WHERE from_entity IN (${placeholders})
-      OR to_entity IN (${placeholders})
-      `,
-      [...entityNames, ...entityNames]
-    );
-    const relationsData = relationsReader.getRows();
+      // Create a set of entity names
+      const entityNames = entities.map((entity) => entity.name);
 
-    // Convert results to an array of Relation objects
-    const relations = relationsData.map((row) => {
+      if (entityNames.length === 0) {
+        await this.cleanupInstance();
+        return { entities: [], relations: [] };
+      }
+
+      // Create placeholders
+      const placeholders = entityNames.map(() => "?").join(",");
+
+      using conn = await this.getConn();
+
+      // Get related relations
+      const relationsReader = await conn.executeAndReadAll(
+        `
+        SELECT from_entity as "from", to_entity as "to", relationType
+        FROM relations
+        WHERE from_entity IN (${placeholders})
+        OR to_entity IN (${placeholders})
+        `,
+        [...entityNames, ...entityNames]
+      );
+      const relationsData = relationsReader.getRows();
+
+      // Convert results to an array of Relation objects
+      const relations = relationsData.map((row) => {
+        return {
+          from: row[0] as string,
+          to: row[1] as string,
+          relationType: row[2] as string,
+        };
+      });
+
+      // Clean up instance after operation
+      await this.cleanupInstance();
+      
       return {
-        from: row[0] as string,
-        to: row[1] as string,
-        relationType: row[2] as string,
+        entities,
+        relations,
       };
-    });
-
-    return {
-      entities,
-      relations,
-    };
+    } catch (error) {
+      // Clean up instance on error
+      await this.cleanupInstance();
+      throw error;
+    }
   }
 
   /**
@@ -596,30 +643,39 @@ export class DuckDBKnowledgeGraphManager
    * @returns The complete knowledge graph
    */
   async readGraph(): Promise<KnowledgeGraph> {
-    // Get all entities
-    const entities = await this.getAllEntities();
+    try {
+      // Get all entities
+      const entities = await this.getAllEntities();
 
-    using conn = await this.getConn();
+      using conn = await this.getConn();
 
-    // Get all relations
-    const relationsReader = await conn.executeAndReadAll(
-      'SELECT from_entity as "from", to_entity as "to", relationType FROM relations'
-    );
-    const relationsData = relationsReader.getRows();
+      // Get all relations
+      const relationsReader = await conn.executeAndReadAll(
+        'SELECT from_entity as "from", to_entity as "to", relationType FROM relations'
+      );
+      const relationsData = relationsReader.getRows();
 
-    // Convert results to an array of Relation objects
-    const relations = relationsData.map((row) => {
+      // Convert results to an array of Relation objects
+      const relations = relationsData.map((row) => {
+        return {
+          from: row[0] as string,
+          to: row[1] as string,
+          relationType: row[2] as string,
+        };
+      });
+
+      // Clean up instance after operation
+      await this.cleanupInstance();
+      
       return {
-        from: row[0] as string,
-        to: row[1] as string,
-        relationType: row[2] as string,
+        entities,
+        relations,
       };
-    });
-
-    return {
-      entities,
-      relations,
-    };
+    } catch (error) {
+      // Clean up instance on error
+      await this.cleanupInstance();
+      throw error;
+    }
   }
 
   /**
@@ -699,11 +755,17 @@ export class DuckDBKnowledgeGraphManager
           };
         });
 
+        // Clean up instance after operation
+        this.cleanupInstance();
+        
         return {
           entities,
           relations,
         };
       } else {
+        // Clean up instance after operation
+        this.cleanupInstance();
+        
         return {
           entities,
           relations: [],
@@ -711,6 +773,8 @@ export class DuckDBKnowledgeGraphManager
       }
     } catch (error: unknown) {
       this.logger.error("Error opening nodes", extractError(error));
+      // Clean up instance on error
+      await this.cleanupInstance();
       return { entities: [], relations: [] };
     }
   }
