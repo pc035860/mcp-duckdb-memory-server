@@ -4,6 +4,7 @@ import {
   Relation,
   Observation,
   KnowledgeGraph,
+  MultiKeywordSearchOptions,
 } from "./types";
 import { Logger, ConsoleLogger } from "./logger";
 import { DuckDBInstance } from "@duckdb/node-api";
@@ -636,6 +637,165 @@ export class DuckDBKnowledgeGraphManager
       await this.cleanupInstance();
       throw error;
     }
+  }
+
+  /**
+   * Search for entities using multiple keywords
+   * @param keywords Array of keywords to search
+   * @param options Search options
+   * @returns Knowledge graph with matching entities and their relations
+   */
+  async searchMultiKeywords(
+    keywords: string[], 
+    options?: MultiKeywordSearchOptions
+  ): Promise<KnowledgeGraph> {
+    try {
+      if (!keywords || keywords.length === 0) {
+        return { entities: [], relations: [] };
+      }
+
+      // Filter out empty keywords
+      const validKeywords = keywords.filter(k => k && k.trim() !== "");
+      if (validKeywords.length === 0) {
+        return { entities: [], relations: [] };
+      }
+
+      // Get all entities
+      const allEntities = await this.getAllEntities();
+
+      // Update Fuse.js collection
+      this.fuse.setCollection(allEntities);
+
+      // Apply custom threshold if provided
+      if (options?.threshold !== undefined) {
+        const originalThreshold = this.fuse.options.threshold;
+        this.fuse.options.threshold = options.threshold;
+        
+        try {
+          return await this._performMultiKeywordSearch(validKeywords, options);
+        } finally {
+          // Restore original threshold
+          this.fuse.options.threshold = originalThreshold;
+        }
+      } else {
+        return await this._performMultiKeywordSearch(validKeywords, options);
+      }
+    } catch (error) {
+      // Clean up instance on error
+      await this.cleanupInstance();
+      throw error;
+    }
+  }
+
+  /**
+   * Internal method to perform multi-keyword search
+   * @private
+   */
+  private async _performMultiKeywordSearch(
+    keywords: string[],
+    options?: MultiKeywordSearchOptions
+  ): Promise<KnowledgeGraph> {
+    const mode = options?.mode || 'OR';
+    const fields = options?.fields || ['name', 'entityType', 'observations'];
+
+    let results: Fuse.FuseResult<Entity>[];
+
+    if (mode === 'OR') {
+      // OR mode: Build query to match any keyword in any field
+      const orQuery = {
+        $or: keywords.map(keyword => ({
+          $or: fields.map(field => ({ [field]: keyword }))
+        }))
+      };
+      results = this.fuse.search(orQuery);
+    } else {
+      // AND mode: Search for each keyword and find intersection
+      const allResults = new Map<string, { item: Entity; score: number }>();
+      
+      for (let i = 0; i < keywords.length; i++) {
+        const keyword = keywords[i];
+        const keywordQuery = {
+          $or: fields.map(field => ({ [field]: keyword }))
+        };
+        const keywordResults = this.fuse.search(keywordQuery);
+        
+        if (i === 0) {
+          // First keyword: add all results
+          for (const result of keywordResults) {
+            allResults.set(result.item.name, {
+              item: result.item,
+              score: result.score!
+            });
+          }
+        } else {
+          // Subsequent keywords: keep only intersections
+          const currentMatches = new Set(keywordResults.map(r => r.item.name));
+          for (const [name, result] of allResults) {
+            if (!currentMatches.has(name)) {
+              allResults.delete(name);
+            }
+          }
+        }
+      }
+      
+      results = Array.from(allResults.values()).map(r => ({
+        item: r.item,
+        score: r.score,
+        refIndex: 0
+      }));
+    }
+
+    // Extract entities from search results (remove duplicates)
+    const uniqueEntities = new Map<string, Entity>();
+    for (const result of results) {
+      if (!uniqueEntities.has(result.item.name)) {
+        uniqueEntities.set(result.item.name, result.item);
+      }
+    }
+
+    const entities = Array.from(uniqueEntities.values());
+
+    // Create a set of entity names
+    const entityNames = entities.map((entity) => entity.name);
+
+    if (entityNames.length === 0) {
+      await this.cleanupInstance();
+      return { entities: [], relations: [] };
+    }
+
+    // Create placeholders
+    const placeholders = entityNames.map(() => "?").join(",");
+
+    using conn = await this.getConn();
+
+    // Get related relations
+    const relationsReader = await conn.executeAndReadAll(
+      `
+      SELECT from_entity as "from", to_entity as "to", relationType
+      FROM relations
+      WHERE from_entity IN (${placeholders})
+      OR to_entity IN (${placeholders})
+      `,
+      [...entityNames, ...entityNames]
+    );
+    const relationsData = relationsReader.getRows();
+
+    // Convert results to an array of Relation objects
+    const relations = relationsData.map((row) => {
+      return {
+        from: row[0] as string,
+        to: row[1] as string,
+        relationType: row[2] as string,
+      };
+    });
+
+    // Clean up instance after operation
+    await this.cleanupInstance();
+    
+    return {
+      entities,
+      relations,
+    };
   }
 
   /**

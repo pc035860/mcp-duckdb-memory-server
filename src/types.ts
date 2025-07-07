@@ -50,6 +50,15 @@ export type KnowledgeGraph = {
 };
 
 /**
+ * Options for multi-keyword search
+ */
+export type MultiKeywordSearchOptions = {
+  mode?: 'OR' | 'AND';  // How to combine keywords, defaults to 'OR'
+  fields?: ('name' | 'entityType' | 'observations')[];  // Fields to search in, defaults to all
+  threshold?: number;  // Custom search threshold
+};
+
+/**
  * The KnowledgeGraphManagerInterface is the primary interface for interacting with the knowledge graph
  */
 export type KnowledgeGraphManagerInterface = {
@@ -60,5 +69,6 @@ export type KnowledgeGraphManagerInterface = {
   deleteObservations(deletions: Array<Observation>): Promise<void>;
   deleteRelations(relations: Relation[]): Promise<void>;
   searchNodes(query: string): Promise<KnowledgeGraph>;
+  searchMultiKeywords(keywords: string[], options?: MultiKeywordSearchOptions): Promise<KnowledgeGraph>;
   openNodes(names: string[]): Promise<KnowledgeGraph>;
 };

@@ -202,6 +202,48 @@ server.tool(
   })
 );
 
+// Search multi keywords tool
+server.tool(
+  "search_multi_keywords",
+  "Search for nodes using multiple keywords with configurable search options",
+  {
+    keywords: z
+      .array(z.string())
+      .describe("An array of keywords to search for"),
+    options: z
+      .object({
+        mode: z
+          .enum(["OR", "AND"])
+          .optional()
+          .describe("How to combine keywords (default: OR)"),
+        fields: z
+          .array(z.enum(["name", "entityType", "observations"]))
+          .optional()
+          .describe("Fields to search in (default: all fields)"),
+        threshold: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe("Search threshold for fuzzy matching (0-1, closer to 0 is more strict)"),
+      })
+      .optional()
+      .describe("Search options"),
+  },
+  async ({ keywords, options }) => ({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          await knowledgeGraphManager.searchMultiKeywords(keywords, options),
+          null,
+          2
+        ),
+      },
+    ],
+  })
+);
+
 // Open nodes tool
 server.tool(
   "open_nodes",

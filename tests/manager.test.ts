@@ -524,6 +524,138 @@ describe("DuckDBFuseKnowledgeGraphManager", () => {
     });
   });
 
+  describe("searchMultiKeywords", () => {
+    it("should find entities by multiple keywords in OR mode", async () => {
+      // Create entities
+      await manager.createEntities(testEntities);
+
+      // Search by multiple keywords
+      const results = await manager.searchMultiKeywords(["TypeScript", "GraphQL"]);
+
+      // Verify results - should find both John Smith and GraphQL entities
+      expect(results.entities.length).toBeGreaterThanOrEqual(2);
+      expect(
+        results.entities.some((entity) => entity.name === "John Smith")
+      ).toBe(true);
+      expect(
+        results.entities.some((entity) => entity.name === "GraphQL")
+      ).toBe(true);
+    });
+
+    it("should find entities by multiple keywords in AND mode", async () => {
+      // Create entities
+      await manager.createEntities(testEntities);
+
+      // Search by multiple keywords in AND mode
+      const results = await manager.searchMultiKeywords(
+        ["TypeScript", "React"], 
+        { mode: 'AND' }
+      );
+
+      // Verify results - should only find entities that match both keywords
+      expect(results.entities.length).toBeGreaterThan(0);
+      expect(
+        results.entities.some((entity) => entity.name === "John Smith")
+      ).toBe(true);
+      
+      // John Smith should have both TypeScript and React in observations
+      const johnSmith = results.entities.find(e => e.name === "John Smith");
+      expect(johnSmith).toBeDefined();
+      const allObservations = johnSmith!.observations.join(" ");
+      expect(allObservations).toContain("TypeScript");
+      expect(allObservations).toContain("React");
+    });
+
+    it("should respect field restrictions", async () => {
+      // Create entities
+      await manager.createEntities(testEntities);
+
+      // Search only in entityType field
+      const results = await manager.searchMultiKeywords(
+        ["Person", "Organization"], 
+        { fields: ['entityType'] }
+      );
+
+      // Should find entities with these entity types
+      expect(results.entities.length).toBeGreaterThanOrEqual(2);
+      expect(
+        results.entities.some((entity) => entity.entityType === "Person")
+      ).toBe(true);
+      expect(
+        results.entities.some((entity) => entity.entityType === "Organization")
+      ).toBe(true);
+    });
+
+    it("should use custom threshold", async () => {
+      // Create entities
+      await manager.createEntities(testEntities);
+
+      // Search with very strict threshold
+      const strictResults = await manager.searchMultiKeywords(
+        ["TypeScri"], // Partial match
+        { threshold: 0.1 }
+      );
+
+      // Search with loose threshold
+      const looseResults = await manager.searchMultiKeywords(
+        ["TypeScri"], // Same partial match
+        { threshold: 0.8 }
+      );
+
+      // Loose results should have more matches
+      expect(looseResults.entities.length).toBeGreaterThanOrEqual(
+        strictResults.entities.length
+      );
+    });
+
+    it("should return empty array for empty keywords", async () => {
+      // Create entities
+      await manager.createEntities(testEntities);
+
+      // Search with empty keywords
+      const results = await manager.searchMultiKeywords([]);
+      expect(results.entities).toHaveLength(0);
+      expect(results.relations).toHaveLength(0);
+    });
+
+    it("should filter out empty keyword strings", async () => {
+      // Create entities
+      await manager.createEntities(testEntities);
+
+      // Search with some empty strings
+      const results = await manager.searchMultiKeywords(["", "TypeScript", "  "]);
+      
+      // Should still find results for TypeScript
+      expect(results.entities.length).toBeGreaterThan(0);
+      expect(
+        results.entities.some((entity) => 
+          entity.name === "John Smith" || 
+          entity.name === "Knowledge Graph Project"
+        )
+      ).toBe(true);
+    });
+
+    it("should return related relations for found entities", async () => {
+      // Create entities and relations
+      await manager.createEntities(testEntities);
+      await manager.createRelations(testRelations);
+
+      // Search for keywords that will find related entities
+      const results = await manager.searchMultiKeywords(["John", "Acme"]);
+
+      // Should find relations between found entities
+      expect(results.relations.length).toBeGreaterThan(0);
+      expect(
+        results.relations.some(
+          (relation) =>
+            relation.from === "John Smith" &&
+            relation.to === "Acme Corporation" &&
+            relation.relationType === "works at"
+        )
+      ).toBe(true);
+    });
+  });
+
   describe("openNodes", () => {
     it("should retrieve specific entities by name", async () => {
       // Create entities
