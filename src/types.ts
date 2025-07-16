@@ -9,6 +9,7 @@ export const EntityObject = z.object({
   observations: z
     .array(z.string())
     .describe("An array of observation contents associated with the entity"),
+  createdAt: z.string().describe("ISO 8601 timestamp when the entity was created"),
 });
 export type Entity = z.infer<typeof EntityObject>;
 
@@ -26,23 +27,6 @@ export type Relation = {
   from: string;
   to: string;
   relationType: string;
-};
-
-/**
- * Extended types with timestamp information
- */
-export type EntityWithTimestamp = Entity & {
-  created_at?: string;  // ISO 8601 format timestamp
-};
-
-export type RelationWithTimestamp = Relation & {
-  created_at?: string;  // ISO 8601 format timestamp
-};
-
-export type ObservationWithTimestamp = {
-  entityName: string;
-  content: string;
-  created_at?: string;  // ISO 8601 format timestamp
 };
 
 /**

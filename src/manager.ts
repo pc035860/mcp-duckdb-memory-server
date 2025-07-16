@@ -1,7 +1,6 @@
 import {
   KnowledgeGraphManagerInterface,
   Entity,
-  EntityWithTimestamp,
   Relation,
   Observation,
   KnowledgeGraph,
@@ -178,52 +177,6 @@ export class DuckDBKnowledgeGraphManager
   }
 
   /**
-   * Get all entities with timestamp information
-   * @private
-   */
-  private async getAllEntitiesWithTimestamp(): Promise<EntityWithTimestamp[]> {
-    try {
-      using conn = await this.getConn();
-
-      // Retrieve entities with created_at
-      const reader = await conn.executeAndReadAll(`
-        SELECT e.name, e.entityType, e.created_at, o.content
-        FROM entities e
-        LEFT JOIN observations o ON e.name = o.entityName
-      `);
-      const rows = reader.getRows();
-
-      // Group results by entity
-      const entitiesMap = new Map<string, EntityWithTimestamp>();
-
-      for (const row of rows) {
-        const name = row[0] as string;
-        const entityType = row[1] as string;
-        const created_at = row[2] as Date;
-        const content = row[3] as string | null;
-
-        if (!entitiesMap.has(name)) {
-          // Create a new entity with timestamp
-          entitiesMap.set(name, {
-            name,
-            entityType,
-            created_at: created_at.toISOString(),
-            observations: content ? [content] : [],
-          });
-        } else if (content) {
-          // Add observation to existing entity
-          entitiesMap.get(name)!.observations.push(content);
-        }
-      }
-
-      return Array.from(entitiesMap.values());
-    } catch (error) {
-      this.logger.error("Failed to get entities with timestamp", extractError(error));
-      throw error;
-    }
-  }
-
-  /**
    * Get all entities from the database
    * @private
    */
@@ -231,9 +184,9 @@ export class DuckDBKnowledgeGraphManager
     try {
       using conn = await this.getConn();
 
-      // Retrieve entities and observations at once using LEFT JOIN
+      // Retrieve entities with created_at and observations at once using LEFT JOIN
       const reader = await conn.executeAndReadAll(`
-        SELECT e.name, e.entityType, o.content
+        SELECT e.name, e.entityType, e.created_at, o.content
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
       `);
@@ -245,13 +198,15 @@ export class DuckDBKnowledgeGraphManager
       for (const row of rows) {
         const name = row[0] as string;
         const entityType = row[1] as string;
-        const content = row[2] as string | null;
+        const created_at = row[2];
+        const content = row[3] as string | null;
 
         if (!entitiesMap.has(name)) {
-          // Create a new entity
+          // Create a new entity with timestamp
           entitiesMap.set(name, {
             name,
             entityType,
+            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
             observations: content ? [content] : [],
           });
         } else if (content) {
@@ -311,8 +266,42 @@ export class DuckDBKnowledgeGraphManager
             [entity.name, observation]
           );
         }
+      }
 
-        createdEntities.push(entity);
+      // Query the newly created entities to get them with timestamps
+      if (newEntities.length > 0) {
+        const placeholders = newEntities.map(() => "?").join(",");
+        const entityNames = newEntities.map(e => e.name);
+        
+        const reader = await conn.executeAndReadAll(`
+          SELECT e.name, e.entityType, e.created_at, o.content
+          FROM entities e
+          LEFT JOIN observations o ON e.name = o.entityName
+          WHERE e.name IN (${placeholders})
+        `, entityNames);
+        
+        const rows = reader.getRows();
+        const entitiesMap = new Map<string, Entity>();
+
+        for (const row of rows) {
+          const name = row[0] as string;
+          const entityType = row[1] as string;
+          const created_at = row[2];
+          const content = row[3] as string | null;
+
+          if (!entitiesMap.has(name)) {
+            entitiesMap.set(name, {
+              name,
+              entityType,
+              createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+              observations: content ? [content] : [],
+            });
+          } else if (content) {
+            entitiesMap.get(name)!.observations.push(content);
+          }
+        }
+
+        createdEntities.push(...Array.from(entitiesMap.values()));
       }
 
       // Commit transaction
@@ -915,7 +904,7 @@ export class DuckDBKnowledgeGraphManager
       // Retrieve entities and observations at once using LEFT JOIN
       const reader = await conn.executeAndReadAll(
         `
-        SELECT e.name, e.entityType, o.content
+        SELECT e.name, e.entityType, e.created_at, o.content
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
         WHERE e.name IN (${placeholders})
@@ -930,13 +919,15 @@ export class DuckDBKnowledgeGraphManager
       for (const row of rows) {
         const name = row[0] as string;
         const entityType = row[1] as string;
-        const content = row[2] as string | null;
+        const created_at = row[2];
+        const content = row[3] as string | null;
 
         if (!entitiesMap.has(name)) {
-          // Create a new entity
+          // Create a new entity with timestamp
           entitiesMap.set(name, {
             name,
             entityType,
+            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
             observations: content ? [content] : [],
           });
         } else if (content) {

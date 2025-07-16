@@ -774,27 +774,66 @@ describe("DuckDBFuseKnowledgeGraphManager", () => {
     it("should create entities with timestamps", async () => {
       // Create new entities
       const beforeCreate = new Date();
-      await manager.createEntities([testEntities[0]]);
+      const created = await manager.createEntities([testEntities[0]]);
       const afterCreate = new Date();
 
-      // Verify entity was created (API doesn't expose timestamps, but we know they're stored)
-      const results = await manager.openNodes(["John Smith"]);
-      expect(results.entities).toHaveLength(1);
-      expect(results.entities[0].name).toBe("John Smith");
-
-      // The timestamp is stored in the database but not exposed in the API
-      // This test confirms the entity creation still works with the new schema
+      // Verify entity was created with timestamp
+      expect(created).toHaveLength(1);
+      expect(created[0].name).toBe("John Smith");
+      expect(created[0].createdAt).toBeDefined();
+      
+      // Timestamp should be ISO 8601 format
+      const timestamp = new Date(created[0].createdAt);
+      expect(timestamp).toBeInstanceOf(Date);
+      expect(timestamp.getTime()).toBeGreaterThanOrEqual(beforeCreate.getTime());
+      expect(timestamp.getTime()).toBeLessThanOrEqual(afterCreate.getTime());
     });
 
-    it("should handle multiple entity creations", async () => {
-      // Create entities in sequence
-      await manager.createEntities([testEntities[0]]);
-      await new Promise(resolve => setTimeout(resolve, 100)); // Small delay
-      await manager.createEntities([testEntities[1]]);
+    it("should return timestamps in search results", async () => {
+      // Create entities
+      await manager.createEntities([testEntities[0], testEntities[1]]);
 
-      // Verify both entities exist
-      const results = await manager.searchNodes("Smith Corporation");
-      expect(results.entities.length).toBeGreaterThanOrEqual(2);
+      // Search for entities
+      const searchResults = await manager.searchNodes("Smith");
+      expect(searchResults.entities.length).toBeGreaterThan(0);
+      
+      // All entities should have createdAt
+      searchResults.entities.forEach(entity => {
+        expect(entity.createdAt).toBeDefined();
+        expect(typeof entity.createdAt).toBe('string');
+        // Verify ISO 8601 format
+        expect(entity.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      });
+    });
+
+    it("should return timestamps in openNodes results", async () => {
+      // Create entities
+      await manager.createEntities(testEntities);
+
+      // Open specific nodes
+      const results = await manager.openNodes(["John Smith", "Acme Corporation"]);
+      expect(results.entities).toHaveLength(2);
+      
+      // All entities should have createdAt
+      results.entities.forEach(entity => {
+        expect(entity.createdAt).toBeDefined();
+        expect(typeof entity.createdAt).toBe('string');
+      });
+    });
+
+    it("should return timestamps in readGraph results", async () => {
+      // Create entities
+      await manager.createEntities([testEntities[0], testEntities[1]]);
+
+      // Read entire graph
+      const graph = await manager.readGraph();
+      expect(graph.entities.length).toBeGreaterThan(0);
+      
+      // All entities should have createdAt
+      graph.entities.forEach(entity => {
+        expect(entity.createdAt).toBeDefined();
+        expect(typeof entity.createdAt).toBe('string');
+      });
     });
   });
 });
