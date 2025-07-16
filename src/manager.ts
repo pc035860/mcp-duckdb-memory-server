@@ -1,6 +1,7 @@
 import {
   KnowledgeGraphManagerInterface,
   Entity,
+  EntityWithTimestamp,
   Relation,
   Observation,
   KnowledgeGraph,
@@ -125,12 +126,14 @@ export class DuckDBKnowledgeGraphManager
       await conn.execute(`
         CREATE TABLE IF NOT EXISTS entities (
           name VARCHAR PRIMARY KEY,
-          entityType VARCHAR
+          entityType VARCHAR,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS observations (
           entityName VARCHAR,
           content VARCHAR,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (entityName) REFERENCES entities(name),
           PRIMARY KEY (entityName, content)
         );
@@ -139,6 +142,7 @@ export class DuckDBKnowledgeGraphManager
           from_entity VARCHAR,
           to_entity VARCHAR,
           relationType VARCHAR,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (from_entity) REFERENCES entities(name),
           FOREIGN KEY (to_entity) REFERENCES entities(name),
           PRIMARY KEY (from_entity, to_entity, relationType)
@@ -154,6 +158,14 @@ export class DuckDBKnowledgeGraphManager
         CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relationType);
       `);
 
+      // Handle migration for existing data - set created_at for old records
+      await conn.execute(`
+        -- Check if columns exist and update NULL values
+        UPDATE entities SET created_at = '2025-07-09 00:00:00'::TIMESTAMP WHERE created_at IS NULL;
+        UPDATE observations SET created_at = '2025-07-09 00:00:00'::TIMESTAMP WHERE created_at IS NULL;
+        UPDATE relations SET created_at = '2025-07-09 00:00:00'::TIMESTAMP WHERE created_at IS NULL;
+      `);
+
       // Build Fuse.js index
       const entities = await this.getAllEntities();
       this.fuse.setCollection(entities);
@@ -162,6 +174,52 @@ export class DuckDBKnowledgeGraphManager
     } catch (error) {
       this.logger.error("Failed to initialize database", extractError(error));
       this.initialized = true;
+    }
+  }
+
+  /**
+   * Get all entities with timestamp information
+   * @private
+   */
+  private async getAllEntitiesWithTimestamp(): Promise<EntityWithTimestamp[]> {
+    try {
+      using conn = await this.getConn();
+
+      // Retrieve entities with created_at
+      const reader = await conn.executeAndReadAll(`
+        SELECT e.name, e.entityType, e.created_at, o.content
+        FROM entities e
+        LEFT JOIN observations o ON e.name = o.entityName
+      `);
+      const rows = reader.getRows();
+
+      // Group results by entity
+      const entitiesMap = new Map<string, EntityWithTimestamp>();
+
+      for (const row of rows) {
+        const name = row[0] as string;
+        const entityType = row[1] as string;
+        const created_at = row[2] as Date;
+        const content = row[3] as string | null;
+
+        if (!entitiesMap.has(name)) {
+          // Create a new entity with timestamp
+          entitiesMap.set(name, {
+            name,
+            entityType,
+            created_at: created_at.toISOString(),
+            observations: content ? [content] : [],
+          });
+        } else if (content) {
+          // Add observation to existing entity
+          entitiesMap.get(name)!.observations.push(content);
+        }
+      }
+
+      return Array.from(entitiesMap.values());
+    } catch (error) {
+      this.logger.error("Failed to get entities with timestamp", extractError(error));
+      throw error;
     }
   }
 

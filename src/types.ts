@@ -29,6 +29,23 @@ export type Relation = {
 };
 
 /**
+ * Extended types with timestamp information
+ */
+export type EntityWithTimestamp = Entity & {
+  created_at?: string;  // ISO 8601 format timestamp
+};
+
+export type RelationWithTimestamp = Relation & {
+  created_at?: string;  // ISO 8601 format timestamp
+};
+
+export type ObservationWithTimestamp = {
+  entityName: string;
+  content: string;
+  created_at?: string;  // ISO 8601 format timestamp
+};
+
+/**
  * Observations are discrete pieces of information about an entity
  */
 export const ObservationObject = z.object({
