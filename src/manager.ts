@@ -157,13 +157,58 @@ export class DuckDBKnowledgeGraphManager
         CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(relationType);
       `);
 
-      // Handle migration for existing data - set created_at for old records
+      // Handle migration for existing databases
+      try {
+        // Add columns if they don't exist (for old databases)
+        // Note: We don't use DEFAULT here to allow NULL values for old data
+        await conn.execute(`
+          ALTER TABLE entities ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
+          ALTER TABLE observations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
+          ALTER TABLE relations ADD COLUMN IF NOT EXISTS created_at TIMESTAMP;
+        `);
+      } catch (alterError) {
+        // Some versions of DuckDB might not support ADD COLUMN IF NOT EXISTS
+        // Try individual ALTER statements with error handling
+        try {
+          await conn.execute(`ALTER TABLE entities ADD COLUMN created_at TIMESTAMP;`);
+        } catch (e) {
+          // Column already exists, ignore
+        }
+        try {
+          await conn.execute(`ALTER TABLE observations ADD COLUMN created_at TIMESTAMP;`);
+        } catch (e) {
+          // Column already exists, ignore
+        }
+        try {
+          await conn.execute(`ALTER TABLE relations ADD COLUMN created_at TIMESTAMP;`);
+        } catch (e) {
+          // Column already exists, ignore
+        }
+      }
+
+      // Update NULL values for old records
       await conn.execute(`
-        -- Check if columns exist and update NULL values
         UPDATE entities SET created_at = '2025-07-09 00:00:00'::TIMESTAMP WHERE created_at IS NULL;
         UPDATE observations SET created_at = '2025-07-09 00:00:00'::TIMESTAMP WHERE created_at IS NULL;
         UPDATE relations SET created_at = '2025-07-09 00:00:00'::TIMESTAMP WHERE created_at IS NULL;
       `);
+
+      // Set DEFAULT for future inserts
+      try {
+        await conn.execute(`ALTER TABLE entities ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP;`);
+      } catch (e) {
+        // Some DuckDB versions or states might not support this, ignore
+      }
+      try {
+        await conn.execute(`ALTER TABLE observations ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP;`);
+      } catch (e) {
+        // Some DuckDB versions or states might not support this, ignore
+      }
+      try {
+        await conn.execute(`ALTER TABLE relations ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP;`);
+      } catch (e) {
+        // Some DuckDB versions or states might not support this, ignore
+      }
 
       // Build Fuse.js index
       const entities = await this.getAllEntities();
@@ -172,7 +217,8 @@ export class DuckDBKnowledgeGraphManager
       this.initialized = true;
     } catch (error) {
       this.logger.error("Failed to initialize database", extractError(error));
-      this.initialized = true;
+      // Don't set initialized to true on failure
+      throw error;
     }
   }
 
@@ -385,13 +431,37 @@ export class DuckDBKnowledgeGraphManager
         );
       }
 
+      // Query the newly created relations to get them with timestamps
+      const createdRelations: Relation[] = [];
+      if (newRelations.length > 0) {
+        for (const relation of newRelations) {
+          const reader = await conn.executeAndReadAll(
+            `SELECT from_entity, to_entity, relationType, created_at 
+             FROM relations 
+             WHERE from_entity = ? AND to_entity = ? AND relationType = ?`,
+            [relation.from, relation.to, relation.relationType]
+          );
+          const rows = reader.getRows();
+          if (rows.length > 0) {
+            const row = rows[0];
+            const created_at = row[3];
+            createdRelations.push({
+              from: row[0] as string,
+              to: row[1] as string,
+              relationType: row[2] as string,
+              createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+            });
+          }
+        }
+      }
+
       // Commit transaction
       await conn.execute("COMMIT");
 
       // Clean up instance after operation
       await this.cleanupInstance();
       
-      return newRelations;
+      return createdRelations;
     } catch (error: unknown) {
       // Rollback in case of error
       await conn.execute("ROLLBACK");
@@ -446,19 +516,44 @@ export class DuckDBKnowledgeGraphManager
             (content) => !existingObservations.has(content)
           );
 
-          // Insert new observations
+          // Insert new observations and collect timestamps
           if (newContents.length > 0) {
+            const insertedContents: Array<{content: string, createdAt: string}> = [];
+            
             for (const content of newContents) {
               await conn.execute(
                 "INSERT INTO observations (entityName, content) VALUES (?, ?)",
                 [observation.entityName, content]
               );
+              
+              // Query the just-inserted observation to get its timestamp
+              const reader = await conn.executeAndReadAll(
+                "SELECT created_at FROM observations WHERE entityName = ? AND content = ?",
+                [observation.entityName, content]
+              );
+              const rows = reader.getRows();
+              if (rows.length > 0) {
+                const created_at = rows[0][0];
+                insertedContents.push({
+                  content,
+                  createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+                });
+              }
             }
 
-            addedObservations.push({
-              entityName: observation.entityName,
-              contents: newContents,
-            });
+            // Get the most recent timestamp from inserted observations
+            if (insertedContents.length > 0) {
+              const latestTimestamp = insertedContents
+                .map(ic => ic.createdAt)
+                .sort()
+                .pop()!;
+                
+              addedObservations.push({
+                entityName: observation.entityName,
+                contents: newContents,
+                createdAt: latestTimestamp
+              });
+            }
           }
         }
       }
@@ -654,7 +749,7 @@ export class DuckDBKnowledgeGraphManager
       // Get related relations
       const relationsReader = await conn.executeAndReadAll(
         `
-        SELECT from_entity as "from", to_entity as "to", relationType
+        SELECT from_entity as "from", to_entity as "to", relationType, created_at
         FROM relations
         WHERE from_entity IN (${placeholders})
         OR to_entity IN (${placeholders})
@@ -665,10 +760,12 @@ export class DuckDBKnowledgeGraphManager
 
       // Convert results to an array of Relation objects
       const relations = relationsData.map((row) => {
+        const created_at = row[3];
         return {
           from: row[0] as string,
           to: row[1] as string,
           relationType: row[2] as string,
+          createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
         };
       });
 
@@ -818,7 +915,7 @@ export class DuckDBKnowledgeGraphManager
     // Get related relations
     const relationsReader = await conn.executeAndReadAll(
       `
-      SELECT from_entity as "from", to_entity as "to", relationType
+      SELECT from_entity as "from", to_entity as "to", relationType, created_at
       FROM relations
       WHERE from_entity IN (${placeholders})
       OR to_entity IN (${placeholders})
@@ -829,10 +926,12 @@ export class DuckDBKnowledgeGraphManager
 
     // Convert results to an array of Relation objects
     const relations = relationsData.map((row) => {
+      const created_at = row[3];
       return {
         from: row[0] as string,
         to: row[1] as string,
         relationType: row[2] as string,
+        createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
       };
     });
 
@@ -858,16 +957,18 @@ export class DuckDBKnowledgeGraphManager
 
       // Get all relations
       const relationsReader = await conn.executeAndReadAll(
-        'SELECT from_entity as "from", to_entity as "to", relationType FROM relations'
+        'SELECT from_entity as "from", to_entity as "to", relationType, created_at FROM relations'
       );
       const relationsData = relationsReader.getRows();
 
       // Convert results to an array of Relation objects
       const relations = relationsData.map((row) => {
+        const created_at = row[3];
         return {
           from: row[0] as string,
           to: row[1] as string,
           relationType: row[2] as string,
+          createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
         };
       });
 
@@ -946,7 +1047,7 @@ export class DuckDBKnowledgeGraphManager
         const placeholders = entityNames.map(() => "?").join(",");
         const relationsReader = await conn.executeAndReadAll(
           `
-        SELECT from_entity as "from", to_entity as "to", relationType
+        SELECT from_entity as "from", to_entity as "to", relationType, created_at
         FROM relations
         WHERE from_entity IN (${placeholders})
         OR to_entity IN (${placeholders})
@@ -957,10 +1058,12 @@ export class DuckDBKnowledgeGraphManager
 
         // Convert results to an array of Relation objects
         const relations = relationsData.map((row) => {
+          const created_at = row[3];
           return {
             from: row[0] as string,
             to: row[1] as string,
             relationType: row[2] as string,
+            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
           };
         });
 

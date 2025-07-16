@@ -27,6 +27,7 @@ export type Relation = {
   from: string;
   to: string;
   relationType: string;
+  createdAt?: string; // ISO 8601 timestamp, optional for backward compatibility
 };
 
 /**
@@ -40,7 +41,9 @@ export const ObservationObject = z.object({
     .array(z.string())
     .describe("An array of observation contents to add"),
 });
-export type Observation = z.infer<typeof ObservationObject>;
+export type Observation = z.infer<typeof ObservationObject> & {
+  createdAt?: string; // ISO 8601 timestamp, optional for backward compatibility
+};
 
 /**
  * The knowledge graph is the primary data structure for storing information in the system

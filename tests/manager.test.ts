@@ -835,5 +835,79 @@ describe("DuckDBFuseKnowledgeGraphManager", () => {
         expect(typeof entity.createdAt).toBe('string');
       });
     });
+
+    it("should return timestamps in createRelations results", async () => {
+      // Create entities first
+      await manager.createEntities(testEntities);
+      
+      // Create relations
+      const created = await manager.createRelations(testRelations);
+      
+      expect(created).toHaveLength(4);
+      
+      // All relations should have createdAt
+      created.forEach(relation => {
+        expect(relation.createdAt).toBeDefined();
+        expect(typeof relation.createdAt).toBe('string');
+        // Verify ISO 8601 format
+        expect(relation.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      });
+    });
+
+    it("should return timestamps in addObservations results", async () => {
+      // Create entities first
+      await manager.createEntities(testEntities);
+      
+      // Add observations
+      const added = await manager.addObservations(testObservations);
+      
+      expect(added).toHaveLength(2);
+      
+      // All observations should have createdAt
+      added.forEach(observation => {
+        expect(observation.createdAt).toBeDefined();
+        expect(typeof observation.createdAt).toBe('string');
+        // Verify ISO 8601 format
+        expect(observation.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      });
+    });
+
+    it("should return timestamps in relations from search results", async () => {
+      // Create entities and relations
+      await manager.createEntities(testEntities);
+      await manager.createRelations(testRelations);
+      
+      // Search
+      const results = await manager.searchNodes("John Smith");
+      
+      expect(results.relations.length).toBeGreaterThan(0);
+      
+      // All relations should have createdAt
+      results.relations.forEach(relation => {
+        expect(relation.createdAt).toBeDefined();
+        expect(typeof relation.createdAt).toBe('string');
+        // Verify ISO 8601 format
+        expect(relation.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      });
+    });
+
+    it("should return timestamps in relations from readGraph", async () => {
+      // Create entities and relations
+      await manager.createEntities(testEntities);
+      await manager.createRelations(testRelations);
+      
+      // Read graph
+      const graph = await manager.readGraph();
+      
+      expect(graph.relations).toHaveLength(4);
+      
+      // All relations should have createdAt
+      graph.relations.forEach(relation => {
+        expect(relation.createdAt).toBeDefined();
+        expect(typeof relation.createdAt).toBe('string');
+        // Verify ISO 8601 format
+        expect(relation.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      });
+    });
   });
 });
