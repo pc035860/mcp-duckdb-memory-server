@@ -1,0 +1,168 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 專案概述
+
+這是一個 MCP DuckDB Memory Server 專案，提供基於 DuckDB 的持久化知識圖譜記憶體服務。專案採用主/次服務器架構（Main/Secondary Server Architecture），支援多個 MCP 客戶端共享同一個知識圖譜。
+
+## 常用開發命令
+
+### 基本開發流程
+```bash
+# 安裝依賴（必須使用 pnpm）
+pnpm install
+
+# 開發模式（熱重載）
+pnpm dev
+
+# 構建專案
+pnpm build
+
+# 執行構建後的程式
+pnpm start
+
+# 執行測試
+pnpm test
+
+# 執行特定測試
+pnpm test -- tests/specific.test.ts
+
+# 測試覆蓋率
+pnpm test:coverage
+
+# 程式碼格式化
+pnpm format
+
+# 檢查格式
+pnpm format:check
+
+# 類型檢查
+pnpm typecheck
+```
+
+### Docker 相關
+```bash
+# 構建 Docker 映像
+docker build -t mcp-duckdb-memory-server .
+
+# 執行 Docker Compose（多服務器部署）
+docker-compose up -d
+
+# 查看服務日誌
+docker-compose logs -f
+```
+
+## 架構說明
+
+### 主/次服務器架構
+- **Main Server**: 擁有 DuckDB 實例，透過 Unix Domain Socket 提供 IPC 服務
+- **Secondary Server**: 提供 MCP 介面，將請求轉發給 Main Server
+- 這種架構允許多個 MCP 客戶端（如 Claude Desktop）共享同一個知識圖譜
+
+### 核心模組結構
+```
+src/
+├── config/         # ServerConfig 類別，管理服務器配置
+├── managers/       
+│   ├── DuckDBManager.ts    # 主服務器的資料庫管理器
+│   └── ProxyManager.ts     # 次服務器的代理管理器
+├── queue/          # RequestQueue 實作請求序列化
+├── servers/
+│   ├── MainServer.ts       # 主服務器實作
+│   ├── SecondaryServer.ts  # 次服務器實作
+│   └── ipc/               # IPC 通訊協議定義
+└── index.ts       # 入口點，根據配置啟動對應服務器
+```
+
+### 關鍵設計決策
+1. **請求序列化**: 使用 RequestQueue 確保 DuckDB 操作的原子性
+2. **IPC 通訊**: 使用 Unix Domain Socket 進行高效的本地通訊
+3. **自動重連**: Secondary Server 會自動重試連接 Main Server
+4. **環境配置**: 透過環境變數靈活配置服務器模式和參數
+
+## 開發注意事項
+
+### TypeScript 配置
+- 使用 ES2022 目標
+- 啟用嚴格模式
+- 模組系統：ESM (type: "module")
+- 路徑別名：使用 `@/` 對應 `src/`
+
+### 測試策略
+- 使用 Vitest 進行單元測試
+- 測試檔案位於 `tests/` 目錄
+- Mock DuckDB 連線以避免測試間干擾
+- 測試 IPC 通訊時使用臨時 socket 路徑
+
+### 資料庫操作
+- 所有資料庫操作都必須透過 RequestQueue
+- 使用 prepared statements 提升效能
+- 實體名稱使用小寫以確保一致性
+- 支援模糊搜尋（透過 Fuse.js）
+
+### 錯誤處理
+- 使用 Zod 進行輸入驗證
+- 自訂錯誤類型（如 MCPError）
+- 適當的錯誤日誌記錄（使用 logger.ts）
+
+## Git Commit 規範
+
+本專案使用 Conventional Commits 格式：
+
+### 格式
+```
+<type>(<scope>): <description>
+```
+
+### 類型 (type)
+- `feat`: 新功能
+- `fix`: 錯誤修復
+- `docs`: 文件更新
+- `style`: 程式碼風格調整（不影響功能）
+- `refactor`: 重構（既不是修復錯誤也不是新增功能）
+- `test`: 測試相關
+- `chore`: 建構程序或輔助工具的變動
+- `perf`: 效能改進
+- `build`: 影響建構系統或外部依賴的變更
+- `ci`: CI 配置檔案和腳本的變更
+
+### 範圍 (scope)
+- `architecture`: 架構相關變更
+- `manager`: 管理器相關（DuckDBManager, ProxyManager）
+- `types`: TypeScript 類型定義
+- `search`: 搜尋功能
+- `queue`: 請求佇列
+- `ipc`: IPC 通訊
+- `config`: 配置相關
+- `docker`: Docker 相關
+
+### 範例
+```bash
+feat(architecture): implement multi-server mode with Docker support and IPC communication
+fix(manager): improve database migration compatibility and ensure timestamp consistency
+feat(types): expose createdAt timestamp in Entity interface
+docs(manager): add instance lifecycle management documentation
+```
+
+## 部署注意事項
+
+### Docker 部署
+- 基礎映像：node:22-slim
+- 記憶體檔案掛載：`/app/memory`
+- 健康檢查：透過 MCP 工具呼叫
+
+### 環境變數
+```bash
+SERVER_MODE=main|secondary     # 服務器模式
+MEMORY_FILE_PATH=./memory.db  # DuckDB 檔案路徑
+IPC_SOCKET_PATH=/tmp/mcp.sock # Unix socket 路徑
+QUEUE_MAX_SIZE=100            # 請求佇列大小
+QUEUE_TIMEOUT_MS=30000        # 請求逾時（毫秒）
+DEBUG=true|false              # 除錯模式
+```
+
+### Claude Desktop 整合
+配置檔案位於 `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Main Server 配置使用環境變數
+- Secondary Server 配置需指定 IPC socket 路徑
