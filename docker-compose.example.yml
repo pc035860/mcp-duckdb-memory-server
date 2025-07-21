@@ -1,0 +1,39 @@
+services:
+  main-server:
+    build: .
+    image: mcp-duckdb-memory-server
+    container_name: mcp-main-server
+    environment:
+      - SERVER_MODE=main
+      - MEMORY_FILE_PATH=/data/memory.db
+      - IPC_SOCKET_PATH=/data/main-server.sock
+      - DEBUG=false
+      - QUEUE_MAX_SIZE=100
+      - QUEUE_TIMEOUT_MS=30000
+    volumes:
+      # Mount your data directory here
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "test", "-S", "/data/main-server.sock"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Add secondary servers as needed
+  # secondary-server:
+  #   build: .
+  #   image: mcp-duckdb-memory-server
+  #   container_name: mcp-secondary-server
+  #   environment:
+  #     - SERVER_MODE=secondary
+  #     - IPC_SOCKET_PATH=/data/main-server.sock
+  #   volumes:
+  #     - ./data:/data
+  #   depends_on:
+  #     main-server:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   stdin_open: true
+  #   tty: true

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "duckdb-memory-server-docker": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "mcp-data:/app/data",
+        "-e", "SERVER_MODE=secondary",
+        "-e", "IPC_SOCKET_PATH=/app/data/main-server.sock",
+        "mcp-duckdb-memory-server"
+      ]
+    }
+  }
+}

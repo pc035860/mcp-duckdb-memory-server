@@ -10,7 +10,29 @@ startCommand:
         type: string
         description: Optional path for the DuckDB memory file. If not provided, a
           default location will be used.
-    description: Optional configuration for the DuckDB Memory Server.
+      serverMode:
+        type: string
+        enum: ["main", "secondary"]
+        default: "secondary"
+        description: Server operation mode. Use 'main' for the database owner, 'secondary' for MCP proxy (recommended for most clients).
+      ipcSocketPath:
+        type: string
+        description: Optional path for the IPC socket. Only used when serverMode is 'secondary' to connect to main server.
+      queueMaxSize:
+        type: number
+        default: 100
+        minimum: 1
+        description: Maximum request queue size for main server.
+      queueTimeoutMs:
+        type: number
+        default: 30000
+        minimum: 1000
+        description: Request timeout in milliseconds for main server.
+      debug:
+        type: boolean
+        default: false
+        description: Enable debug logging for troubleshooting.
+    description: Configuration for the DuckDB Memory Server. Most users should use 'secondary' mode and ensure a 'main' server is running separately.
   commandFunction:
     # A JS function that produces the CLI command based on the given config to start the MCP on stdio.
     |-
@@ -19,12 +41,39 @@ startCommand:
       const command = 'node';
       const args = ['dist/index.mjs'];
 
-      // Set environment variable if memoryFilePath provided
+      // Set environment variables based on config
       const env = {};
+      
+      // Server mode (defaults to secondary for MCP clients)
+      env.SERVER_MODE = config.serverMode || 'secondary';
+      
+      // Memory file path
       if(config.memoryFilePath) {
         env.MEMORY_FILE_PATH = config.memoryFilePath;
       }
+      
+      // IPC socket path (for secondary servers)
+      if(config.ipcSocketPath) {
+        env.IPC_SOCKET_PATH = config.ipcSocketPath;
+      }
+      
+      // Queue configuration (for main servers)
+      if(config.queueMaxSize) {
+        env.QUEUE_MAX_SIZE = config.queueMaxSize.toString();
+      }
+      if(config.queueTimeoutMs) {
+        env.QUEUE_TIMEOUT_MS = config.queueTimeoutMs.toString();
+      }
+      
+      // Debug mode
+      if(config.debug) {
+        env.DEBUG = 'true';
+      }
+
       return { command, args, env };
     }
   exampleConfig:
+    serverMode: secondary
     memoryFilePath: /tmp/duckdb-memory.data
+    ipcSocketPath: /tmp/duckdb-main-server.sock
+    debug: false

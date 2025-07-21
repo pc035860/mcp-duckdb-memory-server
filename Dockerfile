@@ -10,6 +10,7 @@ COPY src ./src
 
 RUN npm install -g pnpm
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+RUN pnpm build
 
 FROM node:22-slim AS runner
 

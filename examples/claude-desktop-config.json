@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "duckdb-memory-server": {
+      "command": "pnpm",
+      "args": ["start"],
+      "cwd": "/path/to/mcp-duckdb-memory-server",
+      "env": {
+        "SERVER_MODE": "secondary"
+      }
+    }
+  }
+}
