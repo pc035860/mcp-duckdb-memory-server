@@ -4,11 +4,12 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  DatabaseRow,
 } from "../types";
 import { KnowledgeGraphManagerInterface } from "./interface";
 import { Logger, ConsoleLogger } from "../logger";
 import { DuckDBInstance, DuckDBConnection } from "@duckdb/node-api";
-import Fuse from "fuse.js";
+import Fuse, { FuseResult } from "fuse.js";
 import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
 import { extractError } from "../utils";
@@ -649,18 +650,8 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
 
-      if (options?.threshold !== undefined) {
-        const originalThreshold = this.fuse.options.threshold;
-        this.fuse.options.threshold = options.threshold;
-
-        try {
-          return await this._performMultiKeywordSearch(validKeywords, options);
-        } finally {
-          this.fuse.options.threshold = originalThreshold;
-        }
-      } else {
-        return await this._performMultiKeywordSearch(validKeywords, options);
-      }
+      // Execute search with optional threshold
+      return await this._performMultiKeywordSearch(validKeywords, options);
     } catch (error) {
       throw error;
     }
@@ -676,7 +667,13 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     const mode = options?.mode || "OR";
     const fields = options?.fields || ["name", "entityType", "observations"];
 
-    let results: Fuse.FuseResult<Entity>[];
+    // Prepare search options with optional threshold
+    const searchOptions: any = {};
+    if (options?.threshold !== undefined) {
+      searchOptions.threshold = options.threshold;
+    }
+
+    let results: FuseResult<Entity>[];
 
     if (mode === "OR") {
       const orQuery = {
@@ -684,7 +681,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           $or: fields.map((field) => ({ [field]: keyword })),
         })),
       };
-      results = this.fuse.search(orQuery);
+      results = this.fuse.search(orQuery, searchOptions);
     } else {
       const allResults = new Map<string, { item: Entity; score: number }>();
 
@@ -693,7 +690,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         const keywordQuery = {
           $or: fields.map((field) => ({ [field]: keyword })),
         };
-        const keywordResults = this.fuse.search(keywordQuery);
+        const keywordResults = this.fuse.search(keywordQuery, searchOptions);
 
         if (i === 0) {
           for (const result of keywordResults) {

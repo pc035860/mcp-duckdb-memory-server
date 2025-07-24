@@ -8,6 +8,7 @@ import {
 import { KnowledgeGraphManagerInterface } from "./interface";
 import { IPCSocketClient } from "../servers/ipc/socket-client";
 import { Logger } from "../logger";
+import { extractError } from "../utils";
 
 /**
  * Proxy manager that forwards requests to main server via IPC
@@ -33,7 +34,7 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
       this.initialized = true;
       this.logger.info("Proxy manager initialized");
     } catch (error) {
-      this.logger.error("Failed to initialize proxy manager", error);
+      this.logger.error("Failed to initialize proxy manager", extractError(error));
       throw error;
     }
   }
@@ -49,7 +50,7 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
       this.initialized = false;
       this.logger.info("Proxy manager closed");
     } catch (error) {
-      this.logger.error("Error closing proxy manager", error);
+      this.logger.error("Error closing proxy manager", extractError(error));
     }
   }
 

@@ -5,10 +5,11 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  DatabaseRow,
 } from "./types";
 import { Logger, ConsoleLogger } from "./logger";
 import { DuckDBInstance } from "@duckdb/node-api";
-import Fuse from "fuse.js";
+import Fuse, { FuseResult } from "fuse.js";
 import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
 import { extractError } from "./utils";
@@ -289,7 +290,7 @@ export class DuckDBKnowledgeGraphManager
       const existingEntitiesData = existingEntitiesReader.getRows();
       const nameColumnIndex = 0; // name column is the first column
       const existingNames = new Set(
-        existingEntitiesData.map((row) => row[nameColumnIndex] as string)
+        existingEntitiesData.map((row: DatabaseRow) => row[nameColumnIndex] as string)
       );
 
       // Filter new entities
@@ -388,7 +389,7 @@ export class DuckDBKnowledgeGraphManager
       const entityNamesData = entityNamesReader.getRows();
       const nameColumnIndex = 0; // name column is the first column
       const entityNames = new Set(
-        entityNamesData.map((row) => row[nameColumnIndex] as string)
+        entityNamesData.map((row: DatabaseRow) => row[nameColumnIndex] as string)
       );
 
       // Filter valid relations (both from and to entities must exist)
@@ -404,7 +405,7 @@ export class DuckDBKnowledgeGraphManager
       const existingRelationsData = existingRelationsReader.getRows();
 
       // Convert results to an array of Relation objects
-      const existingRelations = existingRelationsData.map((row) => {
+      const existingRelations = existingRelationsData.map((row: DatabaseRow) => {
         return {
           from: row[0] as string,
           to: row[1] as string,
@@ -416,7 +417,7 @@ export class DuckDBKnowledgeGraphManager
       const newRelations = validRelations.filter(
         (newRel) =>
           !existingRelations.some(
-            (existingRel) =>
+            (existingRel: { from: string; to: string; relationType: string }) =>
               existingRel.from === newRel.from &&
               existingRel.to === newRel.to &&
               existingRel.relationType === newRel.relationType
@@ -507,7 +508,7 @@ export class DuckDBKnowledgeGraphManager
           const contentColumnIndex = 0; // content column is the first column
           const existingObservations = new Set(
             existingObservationsData.map(
-              (row) => row[contentColumnIndex] as string
+              (row: DatabaseRow) => row[contentColumnIndex] as string
             )
           );
 
@@ -759,7 +760,7 @@ export class DuckDBKnowledgeGraphManager
       const relationsData = relationsReader.getRows();
 
       // Convert results to an array of Relation objects
-      const relations = relationsData.map((row) => {
+      const relations = relationsData.map((row: DatabaseRow) => {
         const created_at = row[3];
         return {
           from: row[0] as string,
@@ -810,20 +811,8 @@ export class DuckDBKnowledgeGraphManager
       // Update Fuse.js collection
       this.fuse.setCollection(allEntities);
 
-      // Apply custom threshold if provided
-      if (options?.threshold !== undefined) {
-        const originalThreshold = this.fuse.options.threshold;
-        this.fuse.options.threshold = options.threshold;
-        
-        try {
-          return await this._performMultiKeywordSearch(validKeywords, options);
-        } finally {
-          // Restore original threshold
-          this.fuse.options.threshold = originalThreshold;
-        }
-      } else {
-        return await this._performMultiKeywordSearch(validKeywords, options);
-      }
+      // Execute search with optional threshold
+      return await this._performMultiKeywordSearch(validKeywords, options);
     } catch (error) {
       // Clean up instance on error
       await this.cleanupInstance();
@@ -842,7 +831,13 @@ export class DuckDBKnowledgeGraphManager
     const mode = options?.mode || 'OR';
     const fields = options?.fields || ['name', 'entityType', 'observations'];
 
-    let results: Fuse.FuseResult<Entity>[];
+    // Prepare search options with optional threshold
+    const searchOptions: any = {};
+    if (options?.threshold !== undefined) {
+      searchOptions.threshold = options.threshold;
+    }
+
+    let results: FuseResult<Entity>[];
 
     if (mode === 'OR') {
       // OR mode: Build query to match any keyword in any field
@@ -851,7 +846,7 @@ export class DuckDBKnowledgeGraphManager
           $or: fields.map(field => ({ [field]: keyword }))
         }))
       };
-      results = this.fuse.search(orQuery);
+      results = this.fuse.search(orQuery, searchOptions);
     } else {
       // AND mode: Search for each keyword and find intersection
       const allResults = new Map<string, { item: Entity; score: number }>();
@@ -861,7 +856,7 @@ export class DuckDBKnowledgeGraphManager
         const keywordQuery = {
           $or: fields.map(field => ({ [field]: keyword }))
         };
-        const keywordResults = this.fuse.search(keywordQuery);
+        const keywordResults = this.fuse.search(keywordQuery, searchOptions);
         
         if (i === 0) {
           // First keyword: add all results
@@ -925,7 +920,7 @@ export class DuckDBKnowledgeGraphManager
     const relationsData = relationsReader.getRows();
 
     // Convert results to an array of Relation objects
-    const relations = relationsData.map((row) => {
+    const relations = relationsData.map((row: DatabaseRow) => {
       const created_at = row[3];
       return {
         from: row[0] as string,
@@ -962,7 +957,7 @@ export class DuckDBKnowledgeGraphManager
       const relationsData = relationsReader.getRows();
 
       // Convert results to an array of Relation objects
-      const relations = relationsData.map((row) => {
+      const relations = relationsData.map((row: DatabaseRow) => {
         const created_at = row[3];
         return {
           from: row[0] as string,
@@ -1057,7 +1052,7 @@ export class DuckDBKnowledgeGraphManager
         const relationsData = relationsReader.getRows();
 
         // Convert results to an array of Relation objects
-        const relations = relationsData.map((row) => {
+        const relations = relationsData.map((row: DatabaseRow) => {
           const created_at = row[3];
           return {
             from: row[0] as string,

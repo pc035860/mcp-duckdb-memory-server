@@ -1,4 +1,11 @@
 import { z } from "zod";
+import { DuckDBValue } from '@duckdb/node-api';
+
+/**
+ * Database row type for DuckDB query results
+ * Represents a single row returned by DuckDB queries
+ */
+export type DatabaseRow = DuckDBValue[];
 
 /**
  * The primary nodes in the knowledge graph

@@ -16,6 +16,7 @@
     "start": "node dist/index.mjs",
     "prepare": "npm run build",
     "test": "vitest run",
+    "typecheck": "tsc --noEmit",
     "changeset:publish": "pnpm build && changeset publish"
   },
   "bin": {
