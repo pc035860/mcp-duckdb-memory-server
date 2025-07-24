@@ -154,6 +154,20 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   }
 
   /**
+   * Manual checkpoint to force WAL data to be written to disk
+   */
+  async checkpoint(): Promise<void> {
+    try {
+      const conn = await this.getConnection();
+      await conn.run("CHECKPOINT");
+      this.logger.info("Manual checkpoint completed successfully");
+    } catch (error) {
+      this.logger.error("Error during manual checkpoint", extractError(error));
+      throw error;
+    }
+  }
+
+  /**
    * Close the manager and cleanup resources
    */
   async close(): Promise<void> {

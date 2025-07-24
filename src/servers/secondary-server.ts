@@ -258,6 +258,36 @@ export class SecondaryServer {
         ],
       })
     );
+
+    // Manual checkpoint tool
+    this.mcpServer.tool(
+      "manual_checkpoint",
+      "Manually trigger DuckDB checkpoint to force WAL data to be written to disk",
+      {},
+      async () => {
+        try {
+          const result = await this.manager.checkpoint();
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Checkpoint completed successfully: ${result.message}`,
+              },
+            ],
+          };
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Checkpoint failed: ${errorMessage}`,
+              },
+            ],
+          };
+        }
+      }
+    );
   }
 
   /**

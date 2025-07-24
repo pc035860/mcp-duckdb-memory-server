@@ -145,4 +145,14 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
       payload: { names },
     });
   }
+
+  /**
+   * Manual checkpoint to force WAL data to be written to disk
+   */
+  async checkpoint(): Promise<{ success: boolean; message: string }> {
+    return await this.client.sendRequest({
+      type: "checkpoint",
+      payload: {},
+    });
+  }
 }

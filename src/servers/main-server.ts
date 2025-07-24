@@ -16,6 +16,7 @@ import {
   isSearchNodesRequest,
   isSearchMultiKeywordsRequest,
   isOpenNodesRequest,
+  isCheckpointRequest,
 } from "./ipc/protocol";
 
 /**
@@ -187,11 +188,16 @@ export class MainServer {
         return await this.manager.openNodes(request.payload.names);
       }
 
-      throw new Error(`Unknown request type: ${request.type}`);
+      if (isCheckpointRequest(request)) {
+        await this.manager.checkpoint();
+        return { success: true, message: "Checkpoint completed successfully" };
+      }
+
+      throw new Error(`Unknown request type: ${(request as any).type}`);
     } catch (error) {
       this.logger.error("Error handling request", {
-        type: request.type,
-        id: request.id,
+        type: (request as any).type,
+        id: (request as any).id,
         error: extractError(error)
       });
       throw error;

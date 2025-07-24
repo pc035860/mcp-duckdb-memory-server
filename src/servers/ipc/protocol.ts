@@ -18,7 +18,8 @@ export type IPCRequest =
   | DeleteRelationsRequest
   | SearchNodesRequest
   | SearchMultiKeywordsRequest
-  | OpenNodesRequest;
+  | OpenNodesRequest
+  | CheckpointRequest;
 
 /**
  * IPC Response type
@@ -130,6 +131,14 @@ export interface OpenNodesRequest extends BaseRequest {
 }
 
 /**
+ * Checkpoint request
+ */
+export interface CheckpointRequest extends BaseRequest {
+  type: "checkpoint";
+  payload: {};
+}
+
+/**
  * Type guards for request types
  */
 export function isCreateEntitiesRequest(req: IPCRequest): req is CreateEntitiesRequest {
@@ -166,6 +175,10 @@ export function isSearchMultiKeywordsRequest(req: IPCRequest): req is SearchMult
 
 export function isOpenNodesRequest(req: IPCRequest): req is OpenNodesRequest {
   return req.type === "open_nodes";
+}
+
+export function isCheckpointRequest(req: IPCRequest): req is CheckpointRequest {
+  return req.type === "checkpoint";
 }
 
 /**
