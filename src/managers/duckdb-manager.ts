@@ -12,7 +12,7 @@ import { DuckDBInstance, DuckDBConnection } from "@duckdb/node-api";
 import Fuse, { FuseResult } from "fuse.js";
 import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
-import { extractError } from "../utils";
+import { extractError, convertTimestampToISOWithFallback } from "../utils";
 
 /**
  * DuckDB implementation with persistent connection (no cleanup per operation)
@@ -218,7 +218,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           entitiesMap.set(name, {
             name,
             entityType,
-            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+            createdAt: convertTimestampToISOWithFallback(created_at),
             observations: content ? [content] : [],
           });
         } else if (content) {
@@ -290,7 +290,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
             entitiesMap.set(name, {
               name,
               entityType,
-              createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+              createdAt: convertTimestampToISOWithFallback(created_at),
               observations: content ? [content] : [],
             });
           } else if (content) {
@@ -377,7 +377,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
               from: row[0] as string,
               to: row[1] as string,
               relationType: row[2] as string,
-              createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+              createdAt: convertTimestampToISOWithFallback(created_at),
             });
           }
         }
@@ -441,7 +441,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
                 const created_at = rows[0][0];
                 insertedContents.push({
                   content,
-                  createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+                  createdAt: convertTimestampToISOWithFallback(created_at),
                 });
               }
             }
@@ -620,7 +620,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           from: row[0] as string,
           to: row[1] as string,
           relationType: row[2] as string,
-          createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+          createdAt: convertTimestampToISOWithFallback(created_at),
         };
       });
 
@@ -749,7 +749,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         from: row[0] as string,
         to: row[1] as string,
         relationType: row[2] as string,
-        createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+        createdAt: convertTimestampToISOWithFallback(created_at),
       };
     });
 
@@ -791,7 +791,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           entitiesMap.set(name, {
             name,
             entityType,
-            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+            createdAt: convertTimestampToISOWithFallback(created_at),
             observations: content ? [content] : [],
           });
         } else if (content) {
@@ -821,7 +821,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
             from: row[0] as string,
             to: row[1] as string,
             relationType: row[2] as string,
-            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+            createdAt: convertTimestampToISOWithFallback(created_at),
           };
         });
 

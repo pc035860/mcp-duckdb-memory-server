@@ -12,7 +12,7 @@ import { DuckDBInstance } from "@duckdb/node-api";
 import Fuse, { FuseResult } from "fuse.js";
 import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
-import { extractError } from "./utils";
+import { extractError, convertTimestampToISOWithFallback } from "./utils";
 
 /**
  * An implementation of the KnowledgeGraphManagerInterface that uses DuckDB and Fuse.js
@@ -253,7 +253,7 @@ export class DuckDBKnowledgeGraphManager
           entitiesMap.set(name, {
             name,
             entityType,
-            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+            createdAt: convertTimestampToISOWithFallback(created_at),
             observations: content ? [content] : [],
           });
         } else if (content) {
@@ -340,7 +340,7 @@ export class DuckDBKnowledgeGraphManager
             entitiesMap.set(name, {
               name,
               entityType,
-              createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+              createdAt: convertTimestampToISOWithFallback(created_at),
               observations: content ? [content] : [],
             });
           } else if (content) {
@@ -450,7 +450,7 @@ export class DuckDBKnowledgeGraphManager
               from: row[0] as string,
               to: row[1] as string,
               relationType: row[2] as string,
-              createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+              createdAt: convertTimestampToISOWithFallback(created_at)
             });
           }
         }
@@ -537,7 +537,7 @@ export class DuckDBKnowledgeGraphManager
                 const created_at = rows[0][0];
                 insertedContents.push({
                   content,
-                  createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+                  createdAt: convertTimestampToISOWithFallback(created_at)
                 });
               }
             }
@@ -766,7 +766,7 @@ export class DuckDBKnowledgeGraphManager
           from: row[0] as string,
           to: row[1] as string,
           relationType: row[2] as string,
-          createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+          createdAt: convertTimestampToISOWithFallback(created_at)
         };
       });
 
@@ -926,7 +926,7 @@ export class DuckDBKnowledgeGraphManager
         from: row[0] as string,
         to: row[1] as string,
         relationType: row[2] as string,
-        createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+        createdAt: convertTimestampToISOWithFallback(created_at)
       };
     });
 
@@ -963,7 +963,7 @@ export class DuckDBKnowledgeGraphManager
           from: row[0] as string,
           to: row[1] as string,
           relationType: row[2] as string,
-          createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+          createdAt: convertTimestampToISOWithFallback(created_at)
         };
       });
 
@@ -1023,7 +1023,7 @@ export class DuckDBKnowledgeGraphManager
           entitiesMap.set(name, {
             name,
             entityType,
-            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString(),
+            createdAt: convertTimestampToISOWithFallback(created_at),
             observations: content ? [content] : [],
           });
         } else if (content) {
@@ -1058,12 +1058,12 @@ export class DuckDBKnowledgeGraphManager
             from: row[0] as string,
             to: row[1] as string,
             relationType: row[2] as string,
-            createdAt: created_at instanceof Date ? created_at.toISOString() : new Date(created_at as string).toISOString()
+            createdAt: convertTimestampToISOWithFallback(created_at)
           };
         });
 
         // Clean up instance after operation
-        this.cleanupInstance();
+        await this.cleanupInstance();
         
         return {
           entities,
@@ -1071,7 +1071,7 @@ export class DuckDBKnowledgeGraphManager
         };
       } else {
         // Clean up instance after operation
-        this.cleanupInstance();
+        await this.cleanupInstance();
         
         return {
           entities,
