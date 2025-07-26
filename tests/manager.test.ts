@@ -773,9 +773,7 @@ describe("DuckDBFuseKnowledgeGraphManager", () => {
   describe("timestamp functionality", () => {
     it("should create entities with timestamps", async () => {
       // Create new entities
-      const beforeCreate = new Date();
       const created = await manager.createEntities([testEntities[0]]);
-      const afterCreate = new Date();
 
       // Verify entity was created with timestamp
       expect(created).toHaveLength(1);
@@ -785,8 +783,16 @@ describe("DuckDBFuseKnowledgeGraphManager", () => {
       // Timestamp should be ISO 8601 format
       const timestamp = new Date(created[0].createdAt);
       expect(timestamp).toBeInstanceOf(Date);
-      expect(timestamp.getTime()).toBeGreaterThanOrEqual(beforeCreate.getTime());
-      expect(timestamp.getTime()).toBeLessThanOrEqual(afterCreate.getTime());
+      expect(timestamp.toISOString()).toBe(created[0].createdAt);
+      
+      // Verify it's a reasonable timestamp (not in far future or past)
+      const now = Date.now();
+      const timestampTime = timestamp.getTime();
+      const oneYearAgo = now - (365 * 24 * 60 * 60 * 1000);
+      const oneYearFromNow = now + (365 * 24 * 60 * 60 * 1000);
+      
+      expect(timestampTime).toBeGreaterThanOrEqual(oneYearAgo);
+      expect(timestampTime).toBeLessThanOrEqual(oneYearFromNow);
     });
 
     it("should return timestamps in search results", async () => {

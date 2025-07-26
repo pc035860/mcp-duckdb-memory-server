@@ -25,11 +25,13 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   private dbPath: string;
   private logger: Logger;
   private closed: boolean = false;
+  private allowExternalTimestamps: boolean = false;
 
-  constructor(dbPathResolver: () => string, logger?: Logger) {
+  constructor(dbPathResolver: () => string, logger?: Logger, allowExternalTimestamps: boolean = false) {
     const dbPath = dbPathResolver();
     this.dbPath = dbPath;
     this.logger = logger || new ConsoleLogger();
+    this.allowExternalTimestamps = allowExternalTimestamps;
 
     // Create directory if it doesn't exist
     const dbPathDir = dirname(dbPath);
@@ -176,8 +178,15 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
     try {
       if (this.connection) {
-        // Execute CHECKPOINT to ensure data is written to disk
-        await this.connection.run("CHECKPOINT");
+        try {
+          // Try to execute CHECKPOINT to ensure data is written to disk
+          // But don't fail if it errors (e.g., WAL file issues)
+          await this.connection.run("CHECKPOINT");
+        } catch (checkpointError) {
+          // Log but don't throw - this can happen if WAL file is already removed
+          this.logger.debug("Checkpoint failed during close (non-fatal)", extractError(checkpointError));
+        }
+        
         this.connection.close();
         this.connection = null;
       }
@@ -189,6 +198,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.logger.info("DuckDB Manager closed");
     } catch (error) {
       this.logger.error("Error during manager close", extractError(error));
+      // Still mark as closed even if error occurred
+      this.closed = true;
+      throw error;
     }
   }
 
@@ -250,16 +262,34 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const newEntities = entities.filter((entity) => !existingNames.has(entity.name));
 
       for (const entity of newEntities) {
-        await conn.run("INSERT INTO entities (name, entityType) VALUES (?, ?)", [
-          entity.name,
-          entity.entityType,
-        ]);
+        if (entity.createdAt && this.allowExternalTimestamps) {
+          // If createdAt is provided and external timestamps are allowed, use it
+          await conn.run("INSERT INTO entities (name, entityType, created_at) VALUES (?, ?, ?)", [
+            entity.name,
+            entity.entityType,
+            entity.createdAt,
+          ]);
+        } else {
+          // Otherwise, let the database use DEFAULT CURRENT_TIMESTAMP
+          await conn.run("INSERT INTO entities (name, entityType) VALUES (?, ?)", [
+            entity.name,
+            entity.entityType,
+          ]);
+        }
 
         for (const observation of entity.observations) {
-          await conn.run(
-            "INSERT INTO observations (entityName, content) VALUES (?, ?)",
-            [entity.name, observation]
-          );
+          if (entity.createdAt && this.allowExternalTimestamps) {
+            // Use the same timestamp for observations as the entity
+            await conn.run(
+              "INSERT INTO observations (entityName, content, created_at) VALUES (?, ?, ?)",
+              [entity.name, observation, entity.createdAt]
+            );
+          } else {
+            await conn.run(
+              "INSERT INTO observations (entityName, content) VALUES (?, ?)",
+              [entity.name, observation]
+            );
+          }
         }
       }
 
@@ -354,10 +384,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       );
 
       for (const relation of newRelations) {
-        await conn.run(
-          "INSERT INTO relations (from_entity, to_entity, relationType) VALUES (?, ?, ?)",
-          [relation.from, relation.to, relation.relationType]
-        );
+        if (relation.createdAt && this.allowExternalTimestamps) {
+          // If createdAt is provided and external timestamps are allowed, use it
+          await conn.run(
+            "INSERT INTO relations (from_entity, to_entity, relationType, created_at) VALUES (?, ?, ?, ?)",
+            [relation.from, relation.to, relation.relationType, relation.createdAt]
+          );
+        } else {
+          // Otherwise, let the database use DEFAULT CURRENT_TIMESTAMP
+          await conn.run(
+            "INSERT INTO relations (from_entity, to_entity, relationType) VALUES (?, ?, ?)",
+            [relation.from, relation.to, relation.relationType]
+          );
+        }
       }
 
       const createdRelations: Relation[] = [];

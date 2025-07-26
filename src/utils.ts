@@ -205,13 +205,13 @@ export function extractTimestampParts(timestamp: unknown): {
     
     const date = new Date(isoString);
     return {
-      year: date.getFullYear(),
-      month: date.getMonth() + 1, // JavaScript months are 0-based
-      day: date.getDate(),
-      hour: date.getHours(),
-      minute: date.getMinutes(),
-      second: date.getSeconds(),
-      microsecond: date.getMilliseconds() * 1000, // Convert ms to μs
+      year: date.getUTCFullYear(),
+      month: date.getUTCMonth() + 1, // JavaScript months are 0-based
+      day: date.getUTCDate(),
+      hour: date.getUTCHours(),
+      minute: date.getUTCMinutes(),
+      second: date.getUTCSeconds(),
+      microsecond: date.getUTCMilliseconds() * 1000, // Convert ms to μs
     };
   } catch (error) {
     console.error(`Timestamp parts extraction error:`, error, { timestamp });
