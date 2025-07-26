@@ -22,6 +22,9 @@ export interface ServerConfig {
     maxSize: number;
     timeoutMs: number;
   };
+  search: {
+    entityCountThreshold: number;
+  };
 }
 
 /**
@@ -43,6 +46,9 @@ export function getServerConfig(): ServerConfig {
     queue: {
       maxSize: parseInt(process.env.QUEUE_MAX_SIZE || "100", 10),
       timeoutMs: parseInt(process.env.QUEUE_TIMEOUT_MS || "30000", 10),
+    },
+    search: {
+      entityCountThreshold: parseInt(process.env.ENTITY_COUNT_THRESHOLD || "1000", 10),
     },
   };
 }
@@ -142,6 +148,10 @@ export function validateServerConfig(config: ServerConfig): void {
   if (config.queue.timeoutMs <= 0) {
     throw new Error("Queue timeout must be positive");
   }
+
+  if (config.search.entityCountThreshold < 0) {
+    throw new Error("Entity count threshold must be non-negative");
+  }
 }
 
 /**
@@ -154,4 +164,5 @@ export function printServerConfig(config: ServerConfig): void {
   console.log(`  IPC Socket Path: ${config.ipc.socketPath}`);
   console.log(`  Queue Max Size: ${config.queue.maxSize}`);
   console.log(`  Queue Timeout: ${config.queue.timeoutMs}ms`);
+  console.log(`  Entity Count Threshold: ${config.search.entityCountThreshold}`);
 }

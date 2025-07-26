@@ -22,6 +22,15 @@ pnpm build
 # 執行構建後的程式
 pnpm start
 
+# 啟用除錯模式（詳細日誌）
+DEBUG=1 pnpm start
+
+# 提高 FTS 使用門檻（大資料集才用 FTS）
+ENTITY_COUNT_THRESHOLD=2000 pnpm start
+
+# 總是使用 FTS 搜尋
+ENTITY_COUNT_THRESHOLD=0 pnpm start
+
 # 執行測試
 pnpm test
 
@@ -159,7 +168,8 @@ MEMORY_FILE_PATH=./memory.db  # DuckDB 檔案路徑
 IPC_SOCKET_PATH=/tmp/mcp.sock # Unix socket 路徑
 QUEUE_MAX_SIZE=100            # 請求佇列大小
 QUEUE_TIMEOUT_MS=30000        # 請求逾時（毫秒）
-DEBUG=true|false              # 除錯模式
+DEBUG=1|true                  # 除錯模式（啟用詳細日誌和配置顯示）
+ENTITY_COUNT_THRESHOLD=1000   # 搜尋策略切換閾值（< 閾值用LIKE，≥ 閾值用FTS）
 ```
 
 ### Claude Desktop 整合

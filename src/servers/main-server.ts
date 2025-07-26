@@ -37,7 +37,9 @@ export class MainServer {
     // Initialize DuckDB manager
     this.manager = new DuckDBKnowledgeGraphManager(
       () => config.database.path,
-      this.logger
+      this.logger,
+      false, // allowExternalTimestamps
+      config.search.entityCountThreshold
     );
 
     // Initialize request queue
