@@ -18,15 +18,15 @@ class MockDuckDBTimestampValue {
     const date = new Date(Number(this.micros / 1000n));
     return {
       date: {
-        year: date.getFullYear(),
-        month: date.getMonth() + 1,
-        day: date.getDate(),
+        year: date.getUTCFullYear(),
+        month: date.getUTCMonth() + 1,
+        day: date.getUTCDate(),
       },
       time: {
-        hour: date.getHours(),
-        min: date.getMinutes(),
-        sec: date.getSeconds(),
-        micros: date.getMilliseconds() * 1000,
+        hour: date.getUTCHours(),
+        min: date.getUTCMinutes(),
+        sec: date.getUTCSeconds(),
+        micros: date.getUTCMilliseconds() * 1000,
       },
     };
   }

@@ -340,6 +340,40 @@ All secondary servers provide the same MCP tools as before:
 - `search_multi_keywords` - Multi-keyword search with options
 - `open_nodes` - Retrieve specific entities by name
 
+## Utility Tools
+
+### 🔀 Database Merge Tool
+
+The `merge-duckdb` command-line tool allows you to merge two DuckDB knowledge graph databases:
+
+```bash
+# Install the package globally to use the merge tool
+npm install -g @izumisy/mcp-duckdb-memory-server
+
+# Merge two databases
+merge-duckdb source1.db source2.db output.db
+
+# Or use via npm scripts if installed locally
+pnpm merge source1.db source2.db output.db
+```
+
+**Merge Rules:**
+- **Entities**: Keeps the one with earlier `created_at` timestamp when names match
+- **Observations**: Unions all unique observations per entity
+- **Relations**: Keeps the one with earlier `created_at` when the triple (from, to, relationType) matches
+
+**Example:**
+```bash
+# Merge knowledge from two different sessions
+merge-duckdb ~/.local/share/duckdb-memory-server/session1.db \
+             ~/.local/share/duckdb-memory-server/session2.db \
+             ~/.local/share/duckdb-memory-server/merged.db
+
+# Replace the main database with the merged one
+mv ~/.local/share/duckdb-memory-server/merged.db \
+   ~/.local/share/duckdb-memory-server/knowledge-graph.data
+```
+
 ## Installation
 
 ```bash
