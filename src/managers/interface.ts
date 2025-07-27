@@ -83,4 +83,29 @@ export interface KnowledgeGraphManagerInterface {
    * Close and cleanup resources
    */
   close(): Promise<void>;
+
+  /**
+   * Rebuild FTS indexes for maintenance or after bulk data changes
+   */
+  rebuildFTSIndexes(): Promise<void>;
+
+  /**
+   * Check FTS index health and status
+   */
+  checkFTSIndexHealth(): Promise<{
+    ftsEnabled: boolean;
+    entitiesIndexed: number;
+    observationsIndexed: number;
+    status: string;
+  }>;
+
+  /**
+   * Get FTS configuration and statistics
+   */
+  getFTSInfo(): Promise<{
+    enabled: boolean;
+    extensionLoaded: boolean;
+    searchStrategy: string;
+    indexCount: number;
+  }>;
 }

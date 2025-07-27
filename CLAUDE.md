@@ -110,6 +110,21 @@ src/
 - 實體名稱使用小寫以確保一致性
 - 支援模糊搜尋（透過 Fuse.js）
 
+### FTS（全文搜尋）功能
+- **DuckDB FTS 擴展**：自動載入並啟用 BM25 搜尋算法
+- **混合搜尋策略**：
+  - 小資料集（< 1000 實體）：使用 SQL LIKE 搜尋
+  - 大資料集（≥ 1000 實體）：使用 DuckDB FTS 搜尋
+  - 失敗時自動降級到 Fuse.js 模糊搜尋
+- **自動索引管理**：
+  - FTS Debounce 自動重建機制（5 秒延遲）
+  - 資料變更後自動觸發索引更新
+  - 智慧跳過機制（FTS 未啟用或實體數量不足時）
+- **API 支援**：
+  - `rebuildFTSIndexes()`：手動重建 FTS 索引
+  - `checkFTSIndexHealth()`：檢查索引健康狀態
+  - `getFTSInfo()`：查詢 FTS 配置和統計資訊
+
 ### 錯誤處理
 - 使用 Zod 進行輸入驗證
 - 自訂錯誤類型（如 MCPError）
@@ -140,7 +155,8 @@ src/
 - `architecture`: 架構相關變更
 - `manager`: 管理器相關（DuckDBManager, ProxyManager）
 - `types`: TypeScript 類型定義
-- `search`: 搜尋功能
+- `search`: 搜尋功能（包含 FTS 和混合搜尋）
+- `fts`: FTS 全文搜尋相關（索引、重建、debounce 機制）
 - `queue`: 請求佇列
 - `ipc`: IPC 通訊
 - `config`: 配置相關
@@ -151,6 +167,8 @@ src/
 feat(architecture): implement multi-server mode with Docker support and IPC communication
 fix(manager): improve database migration compatibility and ensure timestamp consistency
 feat(types): expose createdAt timestamp in Entity interface
+feat(fts): implement DuckDB hybrid search with LIKE and FTS strategies
+feat(fts): add FTS debounce auto-rebuild mechanism with 5-second delay
 docs(manager): add instance lifecycle management documentation
 ```
 
@@ -169,7 +187,10 @@ IPC_SOCKET_PATH=/tmp/mcp.sock # Unix socket 路徑
 QUEUE_MAX_SIZE=100            # 請求佇列大小
 QUEUE_TIMEOUT_MS=30000        # 請求逾時（毫秒）
 DEBUG=1|true                  # 除錯模式（啟用詳細日誌和配置顯示）
+
+# FTS 搜尋相關配置
 ENTITY_COUNT_THRESHOLD=1000   # 搜尋策略切換閾值（< 閾值用LIKE，≥ 閾值用FTS）
+                             # 設為 0 則總是使用 FTS；設為很大值則偏好 LIKE
 ```
 
 ### Claude Desktop 整合

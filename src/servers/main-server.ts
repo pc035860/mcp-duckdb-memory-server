@@ -17,6 +17,9 @@ import {
   isSearchMultiKeywordsRequest,
   isOpenNodesRequest,
   isCheckpointRequest,
+  isRebuildFTSIndexesRequest,
+  isCheckFTSIndexHealthRequest,
+  isGetFTSInfoRequest,
 } from "./ipc/protocol";
 
 /**
@@ -193,6 +196,19 @@ export class MainServer {
       if (isCheckpointRequest(request)) {
         await this.manager.checkpoint();
         return { success: true, message: "Checkpoint completed successfully" };
+      }
+
+      if (isRebuildFTSIndexesRequest(request)) {
+        await this.manager.rebuildFTSIndexes();
+        return { success: true, message: "FTS indexes rebuilt successfully" };
+      }
+
+      if (isCheckFTSIndexHealthRequest(request)) {
+        return await this.manager.checkFTSIndexHealth();
+      }
+
+      if (isGetFTSInfoRequest(request)) {
+        return await this.manager.getFTSInfo();
       }
 
       throw new Error(`Unknown request type: ${(request as any).type}`);

@@ -148,6 +148,46 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
   }
 
   /**
+   * Rebuild FTS indexes for maintenance or after bulk data changes
+   */
+  async rebuildFTSIndexes(): Promise<void> {
+    await this.client.sendRequest({
+      type: "rebuild_fts_indexes",
+      payload: {},
+    });
+  }
+
+  /**
+   * Check FTS index health and status
+   */
+  async checkFTSIndexHealth(): Promise<{
+    ftsEnabled: boolean;
+    entitiesIndexed: number;
+    observationsIndexed: number;
+    status: string;
+  }> {
+    return await this.client.sendRequest({
+      type: "check_fts_index_health",
+      payload: {},
+    });
+  }
+
+  /**
+   * Get FTS configuration and statistics
+   */
+  async getFTSInfo(): Promise<{
+    enabled: boolean;
+    extensionLoaded: boolean;
+    searchStrategy: string;
+    indexCount: number;
+  }> {
+    return await this.client.sendRequest({
+      type: "get_fts_info",
+      payload: {},
+    });
+  }
+
+  /**
    * Manual checkpoint to force WAL data to be written to disk
    */
   async checkpoint(): Promise<{ success: boolean; message: string }> {

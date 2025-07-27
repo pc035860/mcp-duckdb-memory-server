@@ -19,7 +19,10 @@ export type IPCRequest =
   | SearchNodesRequest
   | SearchMultiKeywordsRequest
   | OpenNodesRequest
-  | CheckpointRequest;
+  | CheckpointRequest
+  | RebuildFTSIndexesRequest
+  | CheckFTSIndexHealthRequest
+  | GetFTSInfoRequest;
 
 /**
  * IPC Response type
@@ -139,6 +142,30 @@ export interface CheckpointRequest extends BaseRequest {
 }
 
 /**
+ * Rebuild FTS indexes request
+ */
+export interface RebuildFTSIndexesRequest extends BaseRequest {
+  type: "rebuild_fts_indexes";
+  payload: {};
+}
+
+/**
+ * Check FTS index health request
+ */
+export interface CheckFTSIndexHealthRequest extends BaseRequest {
+  type: "check_fts_index_health";
+  payload: {};
+}
+
+/**
+ * Get FTS info request
+ */
+export interface GetFTSInfoRequest extends BaseRequest {
+  type: "get_fts_info";
+  payload: {};
+}
+
+/**
  * Type guards for request types
  */
 export function isCreateEntitiesRequest(req: IPCRequest): req is CreateEntitiesRequest {
@@ -179,6 +206,18 @@ export function isOpenNodesRequest(req: IPCRequest): req is OpenNodesRequest {
 
 export function isCheckpointRequest(req: IPCRequest): req is CheckpointRequest {
   return req.type === "checkpoint";
+}
+
+export function isRebuildFTSIndexesRequest(req: IPCRequest): req is RebuildFTSIndexesRequest {
+  return req.type === "rebuild_fts_indexes";
+}
+
+export function isCheckFTSIndexHealthRequest(req: IPCRequest): req is CheckFTSIndexHealthRequest {
+  return req.type === "check_fts_index_health";
+}
+
+export function isGetFTSInfoRequest(req: IPCRequest): req is GetFTSInfoRequest {
+  return req.type === "get_fts_info";
 }
 
 /**

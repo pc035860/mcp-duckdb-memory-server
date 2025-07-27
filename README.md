@@ -221,7 +221,8 @@ Create or update `~/.claude_desktop_config.json`:
       "args": ["start"],
       "cwd": "/path/to/mcp-duckdb-memory-server",
       "env": {
-        "SERVER_MODE": "secondary"
+        "SERVER_MODE": "secondary",
+        "IPC_SOCKET_PATH": "/path/to/ipc-sock.sock"
       }
     }
   }
