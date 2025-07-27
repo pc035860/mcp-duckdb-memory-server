@@ -6,6 +6,7 @@ import { existsSync, rmSync, mkdirSync } from "fs";
 import { resolve } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
+import { generateUniqueTempDir, cleanupTempDir, ensureDbFullyClosed } from "./test-utils.js";
 
 describe("DuckDBMergeTool - Schema Validation and Migration", () => {
   let tool: DuckDBMergeTool;
@@ -18,18 +19,20 @@ describe("DuckDBMergeTool - Schema Validation and Migration", () => {
     tool = new DuckDBMergeTool();
     
     // Create temp directory for test databases
-    tempDir = resolve(tmpdir(), `merge-schema-test-${randomBytes(8).toString('hex')}`);
-    mkdirSync(tempDir, { recursive: true });
+    tempDir = generateUniqueTempDir('merge-schema-test');
     db1Path = resolve(tempDir, "db1.db");
     db2Path = resolve(tempDir, "db2.db");
     outputPath = resolve(tempDir, "merged.db");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Ensure all databases are fully closed
+    await ensureDbFullyClosed(db1Path);
+    await ensureDbFullyClosed(db2Path);
+    await ensureDbFullyClosed(outputPath);
+    
     // Clean up test files
-    if (existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    await cleanupTempDir(tempDir);
   });
 
   it("should detect missing tables in source databases", async () => {
@@ -59,9 +62,66 @@ describe("DuckDBMergeTool - Schema Validation and Migration", () => {
     await expect(tool.merge(db1Path, db2Path, outputPath)).rejects.toThrow(/Invalid schema/);
   });
 
-  it.skip("should handle databases with extra columns gracefully", async () => {
-    // Skip this test due to DuckDB WAL file issues when modifying schema after manager close
-    // The merge functionality is tested elsewhere
+  it("should handle databases with extra columns gracefully", async () => {
+    // Create first database with standard schema
+    const manager1 = new DuckDBKnowledgeGraphManager(() => db1Path, undefined, true);
+    await manager1.initialize();
+    
+    await manager1.createEntities([
+      { name: "TestEntity", entityType: "Type", observations: ["Obs1"], createdAt: "2024-01-01T00:00:00Z" }
+    ]);
+    
+    await manager1.close();
+    await ensureDbFullyClosed(db1Path);
+
+    // Create second database and add extra column
+    const manager2 = new DuckDBKnowledgeGraphManager(() => db2Path, undefined, true);
+    await manager2.initialize();
+    
+    await manager2.createEntities([
+      { name: "TestEntity2", entityType: "Type", observations: ["Obs2"], createdAt: "2024-01-02T00:00:00Z" }
+    ]);
+    
+    await manager2.close();
+    await ensureDbFullyClosed(db2Path);
+    
+    // Add extra column to second database using a fresh connection
+    const instance = await DuckDBInstance.create(db2Path);
+    const conn = await instance.connect();
+    
+    try {
+      // Add an extra column to the entities table
+      await conn.run(`ALTER TABLE entities ADD COLUMN extra_data VARCHAR`);
+      
+      // Update existing record with extra data
+      await conn.run(`UPDATE entities SET extra_data = 'additional info' WHERE name = 'testentity2'`);
+    } finally {
+      conn.close();
+      await ensureDbFullyClosed(db2Path);
+    }
+
+    // Wait to ensure full cleanup
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // Merge should handle the extra column gracefully
+    await tool.merge(db1Path, db2Path, outputPath);
+
+    // Verify merged database works correctly
+    const mergedManager = new DuckDBKnowledgeGraphManager(() => outputPath);
+    await mergedManager.initialize();
+    
+    const result = await mergedManager.openNodes(["TestEntity", "TestEntity2"]);
+    expect(result.entities).toHaveLength(2);
+    
+    const entity1 = result.entities.find(e => e.name === "TestEntity")!;
+    const entity2 = result.entities.find(e => e.name === "TestEntity2")!;
+    
+    expect(entity1).toBeDefined();
+    expect(entity2).toBeDefined();
+    expect(entity1.observations).toContain("Obs1");
+    expect(entity2.observations).toContain("Obs2");
+    
+    await mergedManager.close();
   });
 
   it("should verify index consistency after merge", async () => {

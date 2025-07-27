@@ -67,6 +67,14 @@ export type MultiKeywordSearchOptions = {
   mode?: 'OR' | 'AND';  // How to combine keywords, defaults to 'OR'
   fields?: ('name' | 'entityType' | 'observations')[];  // Fields to search in, defaults to all
   threshold?: number;  // Custom search threshold
+  scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
+};
+
+/**
+ * Options for searchNodes method
+ */
+export type SearchNodesOptions = {
+  scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
 };
 
 /**
@@ -79,7 +87,7 @@ export type KnowledgeGraphManagerInterface = {
   deleteEntities(entityNames: string[]): Promise<void>;
   deleteObservations(deletions: Array<Observation>): Promise<void>;
   deleteRelations(relations: Relation[]): Promise<void>;
-  searchNodes(query: string): Promise<KnowledgeGraph>;
+  searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph>;
   searchMultiKeywords(keywords: string[], options?: MultiKeywordSearchOptions): Promise<KnowledgeGraph>;
   openNodes(names: string[]): Promise<KnowledgeGraph>;
 };

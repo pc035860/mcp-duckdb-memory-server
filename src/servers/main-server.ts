@@ -16,7 +16,11 @@ import {
   isSearchNodesRequest,
   isSearchMultiKeywordsRequest,
   isOpenNodesRequest,
+  isReadGraphRequest,
   isCheckpointRequest,
+  isRebuildFTSIndexesRequest,
+  isCheckFTSIndexHealthRequest,
+  isGetFTSInfoRequest,
 } from "./ipc/protocol";
 
 /**
@@ -37,7 +41,9 @@ export class MainServer {
     // Initialize DuckDB manager
     this.manager = new DuckDBKnowledgeGraphManager(
       () => config.database.path,
-      this.logger
+      this.logger,
+      false, // allowExternalTimestamps
+      config.search.entityCountThreshold
     );
 
     // Initialize request queue
@@ -174,7 +180,7 @@ export class MainServer {
       }
 
       if (isSearchNodesRequest(request)) {
-        return await this.manager.searchNodes(request.payload.query);
+        return await this.manager.searchNodes(request.payload.query, request.payload.options);
       }
 
       if (isSearchMultiKeywordsRequest(request)) {
@@ -188,9 +194,26 @@ export class MainServer {
         return await this.manager.openNodes(request.payload.names);
       }
 
+      if (isReadGraphRequest(request)) {
+        return await this.manager.readGraph();
+      }
+
       if (isCheckpointRequest(request)) {
         await this.manager.checkpoint();
         return { success: true, message: "Checkpoint completed successfully" };
+      }
+
+      if (isRebuildFTSIndexesRequest(request)) {
+        await this.manager.rebuildFTSIndexes();
+        return { success: true, message: "FTS indexes rebuilt successfully" };
+      }
+
+      if (isCheckFTSIndexHealthRequest(request)) {
+        return await this.manager.checkFTSIndexHealth();
+      }
+
+      if (isGetFTSInfoRequest(request)) {
+        return await this.manager.getFTSInfo();
       }
 
       throw new Error(`Unknown request type: ${(request as any).type}`);

@@ -2,7 +2,7 @@
 import { getServerConfig, validateServerConfig, printServerConfig } from "./config/server-config";
 import { MainServer } from "./servers/main-server";
 import { SecondaryServer } from "./servers/secondary-server";
-import { ConsoleLogger } from "./logger";
+import { ConsoleLogger, LogLevel } from "./logger";
 import { extractError } from "./utils";
 
 /**
@@ -10,6 +10,11 @@ import { extractError } from "./utils";
  */
 async function main(): Promise<void> {
   const logger = new ConsoleLogger();
+  
+  // Set log level to DEBUG if DEBUG environment variable is set
+  if (process.env.DEBUG === "1" || process.env.DEBUG?.toLowerCase() === "true") {
+    logger.setLevel(LogLevel.DEBUG);
+  }
   
   try {
     // Get and validate configuration

@@ -4,6 +4,7 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  SearchNodesOptions,
   DatabaseRow,
 } from "../types";
 import { KnowledgeGraphManagerInterface } from "./interface";
@@ -26,12 +27,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   private logger: Logger;
   private closed: boolean = false;
   private allowExternalTimestamps: boolean = false;
+  private entityCountThreshold: number;
+  private ftsEnabled: boolean = false;
+  private ftsRebuildTimer: NodeJS.Timeout | null = null;
+  
+  // FTS index rebuild debounce time in milliseconds
+  private static readonly FTS_REBUILD_DEBOUNCE_MS = 5000;
 
-  constructor(dbPathResolver: () => string, logger?: Logger, allowExternalTimestamps: boolean = false) {
+  constructor(dbPathResolver: () => string, logger?: Logger, allowExternalTimestamps: boolean = false, entityCountThreshold: number = 1000) {
     const dbPath = dbPathResolver();
     this.dbPath = dbPath;
     this.logger = logger || new ConsoleLogger();
     this.allowExternalTimestamps = allowExternalTimestamps;
+    this.entityCountThreshold = entityCountThreshold;
 
     // Create directory if it doesn't exist
     const dbPathDir = dirname(dbPath);
@@ -72,6 +80,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Create DuckDB instance
       this.instance = await DuckDBInstance.create(this.dbPath);
       this.connection = await this.instance.connect();
+
 
       // Create tables if they don't exist
       await this.connection.run(`
@@ -144,6 +153,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         UPDATE relations SET created_at = '${LEGACY_MIGRATION_TIMESTAMP}'::TIMESTAMP WHERE created_at IS NULL;
       `);
 
+      // Initialize FTS search capabilities
+      await this.initializeFTS();
+
       // Build Fuse.js index
       const entities = await this.getAllEntities();
       this.fuse.setCollection(entities);
@@ -171,12 +183,26 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   }
 
   /**
+   * Check if the manager is closed
+   */
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  /**
    * Close the manager and cleanup resources
    */
   async close(): Promise<void> {
     if (this.closed) return;
 
     try {
+      // Clear any pending FTS rebuild timer to prevent memory leaks
+      if (this.ftsRebuildTimer) {
+        clearTimeout(this.ftsRebuildTimer);
+        this.ftsRebuildTimer = null;
+        this.logger.debug("FTS rebuild timer cleared during close");
+      }
+
       if (this.connection) {
         try {
           // Try to execute CHECKPOINT to ensure data is written to disk
@@ -336,6 +362,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Update Fuse.js index
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
+
+      // Schedule FTS index rebuild after data changes
+      await this.scheduleIndexRebuild();
 
       return createdEntities;
     } catch (error: unknown) {
@@ -507,6 +536,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
 
+      // Schedule FTS index rebuild after data changes
+      await this.scheduleIndexRebuild();
+
       return addedObservations;
     } catch (error: unknown) {
       await conn.run("ROLLBACK");
@@ -526,6 +558,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const placeholders = entityNames.map(() => "?").join(",");
 
       // Delete related observations first
+      // ERROR HANDLING STRATEGY: Non-critical cleanup operation
+      // Log error but continue execution - observation cleanup failure
+      // should not prevent entity deletion
       try {
         await conn.run(
           `DELETE FROM observations WHERE entityName IN (${placeholders})`,
@@ -533,9 +568,13 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         );
       } catch (error: unknown) {
         this.logger.error("Error deleting observations", extractError(error));
+        // Continue execution - this is a cleanup operation
       }
 
       // Delete related relations
+      // ERROR HANDLING STRATEGY: Non-critical cleanup operation
+      // Log error but continue execution - relation cleanup failure
+      // should not prevent entity deletion
       try {
         await conn.run(
           `DELETE FROM relations WHERE from_entity IN (${placeholders}) OR to_entity IN (${placeholders})`,
@@ -543,6 +582,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         );
       } catch (error: unknown) {
         this.logger.error("Error deleting relations", extractError(error));
+        // Continue execution - this is a cleanup operation
       }
 
       // Delete entities
@@ -551,6 +591,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Update Fuse.js index
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
+
+      // Schedule FTS index rebuild after data changes
+      await this.scheduleIndexRebuild();
     } catch (error: unknown) {
       this.logger.error("Error deleting entities", extractError(error));
       throw error;
@@ -582,6 +625,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Update Fuse.js index
       const allEntities = await this.getAllEntities();
       this.fuse.setCollection(allEntities);
+
+      // Schedule FTS index rebuild after data changes
+      await this.scheduleIndexRebuild();
     } catch (error: unknown) {
       await conn.run("ROLLBACK");
       this.logger.error("Error deleting observations", extractError(error));
@@ -614,32 +660,68 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   }
 
   /**
-   * Search for entities
+   * Search for entities using hybrid strategy
+   * - Small datasets (< 1000 entities): Use SQL LIKE search
+   * - Large datasets (≥ 1000 entities): Use optimized FTS search
+   * - Fallback: Use Fuse.js fuzzy search if database search fails
    */
-  async searchNodes(query: string): Promise<KnowledgeGraph> {
+  async searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph> {
     try {
       if (!query || query.trim() === "") {
         return { entities: [], relations: [] };
       }
 
-      const allEntities = await this.getAllEntities();
-      this.fuse.setCollection(allEntities);
-      const results = this.fuse.search(query);
-
-      const uniqueEntities = new Map<string, Entity>();
-      for (const result of results) {
-        if (!uniqueEntities.has(result.item.name)) {
-          uniqueEntities.set(result.item.name, result.item);
+      let entities: Entity[] = [];
+      
+      // Extract scope from options
+      const scope = options?.scope;
+      
+      // Get entity count to determine search strategy
+      const entityCount = await this.getEntityCount();
+      this.logger.debug(`Entity count: ${entityCount}, choosing search strategy${scope ? ` with scope: ${scope}` : ''}`);
+      
+      // Choose search strategy based on dataset size
+      if (entityCount < this.entityCountThreshold) {
+        // Small dataset: use SQL LIKE search
+        this.logger.debug("Using LIKE search for small dataset");
+        entities = await this.searchWithLike(query, scope);
+      } else {
+        // Large dataset: use FTS search
+        this.logger.debug("Using FTS search for large dataset");
+        entities = await this.searchWithFTS(query, scope);
+      }
+      
+      // Fallback to Fuse.js if database search returns no results
+      if (entities.length === 0) {
+        this.logger.debug("Database search returned no results, falling back to Fuse.js");
+        let allEntities = await this.getAllEntities();
+        
+        // Apply scope filter if provided
+        if (scope) {
+          const cleanScope = scope.replace(/[\[\]]/g, '');
+          const scopePattern = new RegExp(`^(${cleanScope}|\\[${cleanScope}\\]):`);
+          allEntities = allEntities.filter(entity => scopePattern.test(entity.name));
         }
+        
+        this.fuse.setCollection(allEntities);
+        const results = this.fuse.search(query);
+        
+        const uniqueEntities = new Map<string, Entity>();
+        for (const result of results) {
+          if (!uniqueEntities.has(result.item.name)) {
+            uniqueEntities.set(result.item.name, result.item);
+          }
+        }
+        entities = Array.from(uniqueEntities.values());
       }
 
-      const entities = Array.from(uniqueEntities.values());
       const entityNames = entities.map((entity) => entity.name);
 
       if (entityNames.length === 0) {
         return { entities: [], relations: [] };
       }
 
+      // Get related relations
       const conn = await this.getConnection();
       const placeholders = entityNames.map(() => "?").join(",");
       const relationsReader = await conn.runAndReadAll(
@@ -663,8 +745,10 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         };
       });
 
+      this.logger.debug(`Search completed: ${entities.length} entities, ${relations.length} relations`);
       return { entities, relations };
     } catch (error) {
+      this.logger.error("Error in searchNodes", extractError(error));
       throw error;
     }
   }
@@ -686,12 +770,73 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         return { entities: [], relations: [] };
       }
 
-      const allEntities = await this.getAllEntities();
-      this.fuse.setCollection(allEntities);
+      // Use hybrid search strategy for better performance
+      const entityCount = await this.getEntityCount();
+      
+      let entities: Entity[] = [];
+      
+      // Extract scope from options
+      const scope = options?.scope;
+      
+      if (entityCount < this.entityCountThreshold) {
+        // Small dataset: use SQL LIKE search with multiple keywords
+        this.logger.debug(`Using LIKE search for multi-keyword search${scope ? ` with scope: ${scope}` : ''}`);
+        entities = await this.searchWithMultiKeywordLike(validKeywords, scope);
+      } else {
+        // Large dataset: use FTS search with multiple keywords
+        this.logger.debug(`Using FTS search for multi-keyword search${scope ? ` with scope: ${scope}` : ''}`);
+        entities = await this.searchWithMultiKeywordFTS(validKeywords, scope);
+      }
+      
+      // Fallback to Fuse.js if database search returns no results
+      if (entities.length === 0) {
+        this.logger.debug("Database search returned no results, falling back to Fuse.js");
+        let allEntities = await this.getAllEntities();
+        
+        // Apply scope filter if provided
+        if (scope) {
+          const cleanScope = scope.replace(/[\[\]]/g, '');
+          const scopePattern = new RegExp(`^(${cleanScope}|\\[${cleanScope}\\]):`);
+          allEntities = allEntities.filter(entity => scopePattern.test(entity.name));
+        }
+        
+        this.fuse.setCollection(allEntities);
+        return await this._performMultiKeywordSearch(validKeywords, options);
+      }
 
-      // Execute search with optional threshold
-      return await this._performMultiKeywordSearch(validKeywords, options);
+      const entityNames = entities.map((entity) => entity.name);
+      if (entityNames.length === 0) {
+        return { entities: [], relations: [] };
+      }
+
+      // Get related relations
+      const conn = await this.getConnection();
+      const placeholders = entityNames.map(() => "?").join(",");
+      const relationsReader = await conn.runAndReadAll(
+        `
+        SELECT from_entity as "from", to_entity as "to", relationType, created_at
+        FROM relations
+        WHERE from_entity IN (${placeholders})
+        OR to_entity IN (${placeholders})
+        `,
+        [...entityNames, ...entityNames]
+      );
+      const relationsData = relationsReader.getRows();
+
+      const relations = relationsData.map((row) => {
+        const created_at = row[3];
+        return {
+          from: row[0] as string,
+          to: row[1] as string,
+          relationType: row[2] as string,
+          createdAt: convertTimestampToISOWithFallback(created_at),
+        };
+      });
+
+      this.logger.debug(`Multi-keyword search completed: ${entities.length} entities, ${relations.length} relations`);
+      return { entities, relations };
     } catch (error) {
+      this.logger.error("Error in searchMultiKeywords", extractError(error));
       throw error;
     }
   }
@@ -740,7 +885,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           }
         } else {
           const currentMatches = new Set(keywordResults.map((r) => r.item.name));
-          for (const [name, result] of allResults) {
+          for (const [name] of allResults) {
             if (!currentMatches.has(name)) {
               allResults.delete(name);
             }
@@ -793,6 +938,787 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     });
 
     return { entities, relations };
+  }
+
+  /**
+   * Initialize Full-Text Search capabilities
+   * Creates entity_search_view for FTS operations
+   */
+  private async initializeFTS(): Promise<void> {
+    try {
+      const conn = await this.getConnection();
+      
+      // Step 1: Load DuckDB FTS extension
+      this.logger.debug("Loading DuckDB FTS extension...");
+      await conn.run("INSTALL fts");
+      await conn.run("LOAD fts");
+      this.logger.debug("DuckDB FTS extension loaded successfully");
+      
+      // Step 2: Create a view that combines entities and observations for FTS
+      await conn.run(`
+        CREATE OR REPLACE VIEW entity_search_view AS
+        SELECT 
+          e.name,
+          e.entityType,
+          e.created_at,
+          COALESCE(
+            string_agg(o.content, ' ' ORDER BY o.created_at),
+            ''
+          ) as observations_text
+        FROM entities e
+        LEFT JOIN observations o ON e.name = o.entityName
+        GROUP BY e.name, e.entityType, e.created_at
+      `);
+      
+      // Step 3: Create FTS indexes for entities and observations
+      this.logger.debug("Creating FTS indexes...");
+      
+      // Create FTS index for entities (name only to avoid scalar subquery issues)
+      await conn.run(`
+        PRAGMA create_fts_index(
+          'entities', 
+          'name', 
+          'name',
+          stemmer = 'english',
+          stopwords = 'english',
+          lower = 1,
+          strip_accents = 1,
+          overwrite = 1
+        )
+      `);
+      
+      // Create FTS index for observations (content)
+      await conn.run(`
+        PRAGMA create_fts_index(
+          'observations',
+          'entityName',
+          'content',
+          stemmer = 'english', 
+          stopwords = 'english',
+          lower = 1,
+          strip_accents = 1,
+          overwrite = 1
+        )
+      `);
+      
+      // Mark FTS as successfully enabled
+      this.ftsEnabled = true;
+      this.logger.info("DuckDB FTS initialized successfully with BM25 search capabilities");
+      
+    } catch (error) {
+      // FTS initialization failure is non-fatal, log and continue with fallback
+      this.ftsEnabled = false;
+      this.logger.warn("Failed to initialize DuckDB FTS extension, falling back to LIKE search", extractError(error));
+      
+      // Still create the basic view for fallback search
+      try {
+        const conn = await this.getConnection();
+        await conn.run(`
+          CREATE OR REPLACE VIEW entity_search_view AS
+          SELECT 
+            e.name,
+            e.entityType,
+            e.created_at,
+            COALESCE(
+              string_agg(o.content, ' ' ORDER BY o.created_at),
+              ''
+            ) as observations_text
+          FROM entities e
+          LEFT JOIN observations o ON e.name = o.entityName
+          GROUP BY e.name, e.entityType, e.created_at
+        `);
+        this.logger.debug("Fallback search view created successfully");
+      } catch (viewError) {
+        this.logger.error("Failed to create fallback search view", extractError(viewError));
+      }
+    }
+  }
+
+  /**
+   * Get total entity count for search strategy decision
+   */
+  private async getEntityCount(): Promise<number> {
+    try {
+      const conn = await this.getConnection();
+      const reader = await conn.runAndReadAll("SELECT COUNT(*) as count FROM entities");
+      const rows = reader.getRows();
+      return rows.length > 0 ? (rows[0][0] as number) : 0;
+    } catch (error) {
+      this.logger.error("Error getting entity count", extractError(error));
+      return 0;
+    }
+  }
+
+  /**
+   * Search using DuckDB Full-Text Search capabilities
+   */
+  private async searchWithFTS(query: string, scope?: string): Promise<Entity[]> {
+    try {
+      // Sanitize query input
+      const cleanQuery = query.trim();
+      if (cleanQuery.length === 0) {
+        return [];
+      }
+
+      const conn = await this.getConnection();
+      
+      // Use different search strategies based on FTS availability
+      if (this.ftsEnabled) {
+        return await this.searchWithBM25(cleanQuery, conn, scope);
+      } else {
+        return await this.searchWithLikeFallback(cleanQuery, conn, scope);
+      }
+      
+    } catch (error) {
+      this.logger.error("Error in FTS search", extractError(error));
+      // Fall back to empty results rather than throwing
+      return [];
+    }
+  }
+
+  /**
+   * Search using DuckDB FTS BM25 algorithm (when FTS is enabled)
+   */
+  private async searchWithBM25(query: string, conn: DuckDBConnection, scope?: string): Promise<Entity[]> {
+    try {
+      const entities: Entity[] = [];
+      const entityScores = new Map<string, number>();
+
+      // Build scope filter if provided
+      let scopeCondition = '';
+      const entityParams: any[] = [query];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = 'AND (name ILIKE ? OR name ILIKE ?)';
+        entityParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+      }
+      
+      // Search in entities table using BM25
+      // Use CTE to avoid scalar subquery errors when match_bm25 is used in WHERE clause
+      const entityReader = await conn.runAndReadAll(`
+        WITH scored_entities AS (
+          SELECT name, entityType, created_at, 
+                 fts_main_entities.match_bm25(name, ?) AS score
+          FROM entities
+          WHERE 1=1 ${scopeCondition}
+        )
+        SELECT name, entityType, created_at, score
+        FROM scored_entities
+        WHERE score IS NOT NULL
+        ORDER BY score DESC
+        LIMIT 250
+      `, entityParams);
+
+      const entityRows = entityReader.getRows();
+      for (const row of entityRows) {
+        const name = row[0] as string;
+        const entityType = row[1] as string;
+        const created_at = row[2];
+        const score = row[3] as number;
+        
+        entityScores.set(name, score);
+        
+        // Get observations for this entity
+        const obsReader = await conn.runAndReadAll(
+          "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
+          [name]
+        );
+        const obsRows = obsReader.getRows();
+        const observations = obsRows.map(obsRow => obsRow[0] as string);
+        
+        entities.push({
+          name,
+          entityType,
+          createdAt: convertTimestampToISOWithFallback(created_at),
+          observations
+        });
+      }
+
+      // Search in observations table using BM25
+      // Use CTE to avoid scalar subquery errors when match_bm25 is used in WHERE clause
+      // Use MAX() to aggregate scores when an entity has multiple matching observations
+      const obsParams: any[] = [query];
+      let obsJoinCondition = '';
+      
+      if (scope) {
+        // Join with entities table to apply scope filter
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        obsJoinCondition = `
+          JOIN entities e ON o.entityName = e.name
+          WHERE (e.name ILIKE ? OR e.name ILIKE ?)
+        `;
+        obsParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+      }
+      
+      const obsReader = await conn.runAndReadAll(`
+        WITH scored_observations AS (
+          SELECT o.entityName, 
+                 fts_main_observations.match_bm25(o.content, ?) AS score
+          FROM observations o
+          ${obsJoinCondition}
+        )
+        SELECT entityName, MAX(score) AS score
+        FROM scored_observations
+        WHERE score IS NOT NULL
+        GROUP BY entityName
+        ORDER BY score DESC
+        LIMIT 250
+      `, obsParams);
+
+      const obsRows = obsReader.getRows();
+      for (const row of obsRows) {
+        const entityName = row[0] as string;
+        const obsScore = row[1] as number;
+        
+        // Skip if we already have this entity with a better score
+        if (entityScores.has(entityName) && entityScores.get(entityName)! >= obsScore) {
+          continue;
+        }
+        
+        // Get entity details
+        const entityReader = await conn.runAndReadAll(
+          "SELECT name, entityType, created_at FROM entities WHERE name = ?",
+          [entityName]
+        );
+        const entityRow = entityReader.getRows()[0];
+        if (!entityRow) continue;
+        
+        const name = entityRow[0] as string;
+        const entityType = entityRow[1] as string;
+        const created_at = entityRow[2];
+        
+        // Get observations
+        const entityObsReader = await conn.runAndReadAll(
+          "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
+          [entityName]
+        );
+        const entityObsRows = entityObsReader.getRows();
+        const observations = entityObsRows.map(obsRow => obsRow[0] as string);
+        
+        entities.push({
+          name,
+          entityType,
+          createdAt: convertTimestampToISOWithFallback(created_at),
+          observations
+        });
+        
+        entityScores.set(name, obsScore);
+      }
+
+      // Remove duplicates and sort by best score
+      const uniqueEntities = Array.from(
+        new Map(entities.map(e => [e.name, e])).values()
+      ).sort((a, b) => (entityScores.get(b.name) || 0) - (entityScores.get(a.name) || 0));
+
+      this.logger.debug(`BM25 FTS search for "${query}" returned ${uniqueEntities.length} entities`);
+      return uniqueEntities.slice(0, 100); // Limit final results
+
+    } catch (error) {
+      this.logger.warn("BM25 search failed, falling back to LIKE search", extractError(error));
+      return await this.searchWithLikeFallback(query, conn);
+    }
+  }
+
+  /**
+   * Rebuild FTS indexes (useful for maintenance or after bulk data changes)
+   */
+  async rebuildFTSIndexes(): Promise<void> {
+    if (!this.ftsEnabled) {
+      this.logger.warn("FTS not enabled, skipping index rebuild");
+      return;
+    }
+
+    try {
+      const conn = await this.getConnection();
+      this.logger.info("Rebuilding FTS indexes...");
+
+      // Drop existing indexes
+      try {
+        await conn.run("PRAGMA drop_fts_index('entities')");
+        await conn.run("PRAGMA drop_fts_index('observations')");
+        this.logger.debug("Existing FTS indexes dropped");
+      } catch (dropError) {
+        // Indexes might not exist, continue
+        this.logger.debug("Some FTS indexes might not exist, continuing...", extractError(dropError));
+      }
+
+      // Recreate indexes
+      await conn.run(`
+        PRAGMA create_fts_index(
+          'entities', 
+          'name', 
+          'name',
+          stemmer = 'english',
+          stopwords = 'english',
+          lower = 1,
+          strip_accents = 1,
+          overwrite = 1
+        )
+      `);
+
+      await conn.run(`
+        PRAGMA create_fts_index(
+          'observations',
+          'entityName',
+          'content',
+          stemmer = 'english', 
+          stopwords = 'english',
+          lower = 1,
+          strip_accents = 1,
+          overwrite = 1
+        )
+      `);
+
+      this.logger.info("FTS indexes rebuilt successfully");
+
+    } catch (error) {
+      this.logger.error("Failed to rebuild FTS indexes", extractError(error));
+      throw error;
+    }
+  }
+
+  /**
+   * Check FTS index health and status
+   */
+  async checkFTSIndexHealth(): Promise<{ 
+    ftsEnabled: boolean; 
+    entitiesIndexed: number; 
+    observationsIndexed: number; 
+    status: string 
+  }> {
+    try {
+      const conn = await this.getConnection();
+      const result = {
+        ftsEnabled: this.ftsEnabled,
+        entitiesIndexed: 0,
+        observationsIndexed: 0,
+        status: 'unknown'
+      };
+
+      if (!this.ftsEnabled) {
+        result.status = 'FTS not enabled, using fallback search';
+        return result;
+      }
+
+      try {
+        // Check entities index
+        const entitiesCountReader = await conn.runAndReadAll(
+          "SELECT COUNT(*) as count FROM entities"
+        );
+        const entitiesCount = entitiesCountReader.getRows()[0][0] as number;
+        result.entitiesIndexed = entitiesCount;
+
+        // Check observations index
+        const obsCountReader = await conn.runAndReadAll(
+          "SELECT COUNT(*) as count FROM observations"
+        );
+        const obsCount = obsCountReader.getRows()[0][0] as number;
+        result.observationsIndexed = obsCount;
+
+        // Test FTS functionality with a simple query
+        // Use CTE to avoid scalar subquery errors when match_bm25 is used in WHERE clause
+        await conn.runAndReadAll(`
+          WITH scored_entities AS (
+            SELECT name, fts_main_entities.match_bm25(name, 'test') AS score
+            FROM entities
+          )
+          SELECT name, score
+          FROM scored_entities
+          WHERE score IS NOT NULL
+          LIMIT 1
+        `);
+
+        result.status = 'healthy';
+        this.logger.debug(`FTS health check: ${result.entitiesIndexed} entities, ${result.observationsIndexed} observations indexed`);
+
+      } catch (testError) {
+        result.status = 'degraded - FTS queries failing';
+        this.logger.warn("FTS health check failed, indexes may be corrupted", extractError(testError));
+      }
+
+      return result;
+
+    } catch (error) {
+      this.logger.error("FTS health check failed", extractError(error));
+      return {
+        ftsEnabled: false,
+        entitiesIndexed: 0,
+        observationsIndexed: 0,
+        status: 'failed'
+      };
+    }
+  }
+
+  /**
+   * Get FTS configuration and statistics
+   */
+  async getFTSInfo(): Promise<{
+    enabled: boolean;
+    extensionLoaded: boolean;
+    searchStrategy: string;
+    indexCount: number;
+  }> {
+    // Check if manager is closed
+    if (this.closed) {
+      throw new Error("Manager has been closed");
+    }
+
+    try {
+      const conn = await this.getConnection();
+      
+      // Determine if FTS will actually be used based on current entity count
+      const entityCount = await this.getEntityCount();
+      const willUseFTS = this.ftsEnabled && entityCount >= this.entityCountThreshold;
+      
+      const info = {
+        enabled: willUseFTS,
+        extensionLoaded: false,
+        searchStrategy: willUseFTS ? 'BM25' : 'ILIKE',
+        indexCount: 0
+      };
+
+      // Check if FTS extension is loaded
+      try {
+        await conn.runAndReadAll("SELECT fts_main_entities.match_bm25('test', 'test')");
+        info.extensionLoaded = true;
+      } catch {
+        info.extensionLoaded = false;
+      }
+
+      // Count available indexes (simplified check)
+      if (this.ftsEnabled) {
+        info.indexCount = 2; // entities + observations
+      }
+
+      return info;
+
+    } catch (error) {
+      this.logger.error("Failed to get FTS info", extractError(error));
+      return {
+        enabled: false,
+        extensionLoaded: false,
+        searchStrategy: 'ILIKE',
+        indexCount: 0
+      };
+    }
+  }
+
+  /**
+   * Fallback search using ILIKE when FTS is not available
+   */
+  private async searchWithLikeFallback(query: string, conn: DuckDBConnection, scope?: string): Promise<Entity[]> {
+    // Split query into search terms for more precise matching
+    const searchTerms = query.split(/\s+/).filter(term => term.length > 0);
+    
+    if (searchTerms.length === 0) {
+      return [];
+    }
+    
+    // Build dynamic WHERE clause for multiple search terms
+    const whereConditions = searchTerms.map(() => 
+      "(name ILIKE ? OR entityType ILIKE ? OR observations_text ILIKE ?)"
+    ).join(" AND ");
+    
+    // Prepare parameters (each term used 3 times for name, entityType, observations)
+    const params = searchTerms.flatMap(term => {
+      const likePattern = `%${term}%`;
+      return [likePattern, likePattern, likePattern];
+    });
+    
+    // Add scope filter if provided
+    let scopeCondition = '';
+    if (scope) {
+      const cleanScope = scope.replace(/[\[\]]/g, '');
+      scopeCondition = ' AND (name ILIKE ? OR name ILIKE ?)';
+      params.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+    }
+    
+    const reader = await conn.runAndReadAll(`
+      SELECT DISTINCT name, entityType, created_at
+      FROM entity_search_view
+      WHERE ${whereConditions}${scopeCondition}
+      ORDER BY 
+        -- Prioritize exact name matches
+        CASE WHEN name ILIKE ? THEN 1
+             WHEN entityType ILIKE ? THEN 2
+             ELSE 3 END,
+        created_at DESC
+      LIMIT 100
+    `, [...params, `%${query}%`, `%${query}%`]);
+    
+    const rows = reader.getRows();
+    const entities: Entity[] = [];
+    
+    for (const row of rows) {
+      const name = row[0] as string;
+      const entityType = row[1] as string;
+      const created_at = row[2];
+      
+      // Get observations for this entity
+      const obsReader = await conn.runAndReadAll(
+        "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
+        [name]
+      );
+      const obsRows = obsReader.getRows();
+      const observations = obsRows.map(obsRow => obsRow[0] as string);
+      
+      entities.push({
+        name,
+        entityType,
+        createdAt: convertTimestampToISOWithFallback(created_at),
+        observations
+      });
+    }
+    
+    this.logger.debug(`Fallback LIKE search for "${query}" returned ${entities.length} entities`);
+    return entities;
+  }
+
+  /**
+   * Search using SQL LIKE queries for smaller datasets
+   */
+  private async searchWithLike(query: string, scope?: string): Promise<Entity[]> {
+    try {
+      const conn = await this.getConnection();
+      const likePattern = `%${query}%`;
+      
+      // Build scope filter if provided
+      let scopeCondition = '';
+      const scopeParams: any[] = [];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = 'AND (e.name ILIKE ? OR e.name ILIKE ?)';
+        scopeParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+        this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
+      } else {
+        this.logger.debug('No scope filter applied');
+      }
+      
+      const queryParams = [likePattern, likePattern, likePattern, ...scopeParams, `%${query}%`, `%${query}%`];
+      
+      const sql = `
+        SELECT DISTINCT e.name, e.entityType, e.created_at
+        FROM entities e
+        LEFT JOIN observations o ON e.name = o.entityName
+        WHERE (e.name ILIKE ?
+           OR e.entityType ILIKE ?
+           OR o.content ILIKE ?)
+        ${scopeCondition}
+        ORDER BY 
+          -- Prioritize exact name matches
+          CASE WHEN e.name ILIKE ? THEN 1
+               WHEN e.entityType ILIKE ? THEN 2
+               ELSE 3 END,
+          e.created_at DESC
+        LIMIT 500
+      `;
+      
+      this.logger.debug('Executing SQL:', { sql, params: queryParams });
+      
+      const reader = await conn.runAndReadAll(sql, queryParams);
+      
+      const rows = reader.getRows();
+      const entities: Entity[] = [];
+      
+      for (const row of rows) {
+        const name = row[0] as string;
+        const entityType = row[1] as string;
+        const created_at = row[2];
+        
+        // Get observations for this entity
+        const obsReader = await conn.runAndReadAll(
+          "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
+          [name]
+        );
+        const obsRows = obsReader.getRows();
+        const observations = obsRows.map(obsRow => obsRow[0] as string);
+        
+        entities.push({
+          name,
+          entityType,
+          createdAt: convertTimestampToISOWithFallback(created_at),
+          observations
+        });
+      }
+      
+      this.logger.debug(`LIKE search for "${query}" returned ${entities.length} entities`);
+      return entities;
+    } catch (error) {
+      this.logger.error("Error in LIKE search", extractError(error));
+      // Fall back to empty results rather than throwing
+      return [];
+    }
+  }
+
+  /**
+   * Search using FTS approach with multiple keywords for large datasets
+   */
+  private async searchWithMultiKeywordFTS(keywords: string[], scope?: string): Promise<Entity[]> {
+    try {
+      const conn = await this.getConnection();
+      
+      if (keywords.length === 0) {
+        return [];
+      }
+      
+      // Build dynamic WHERE clause for multiple search terms (AND logic)
+      // SECURITY NOTE: This dynamic SQL construction is safe because:
+      // 1. whereConditions contains only fixed template strings with ? placeholders
+      // 2. All user input is passed through prepared statement parameters
+      // 3. No direct string concatenation of user data occurs
+      const whereConditions = keywords.map(() => 
+        "(name ILIKE ? OR entityType ILIKE ? OR observations_text ILIKE ?)"
+      ).join(" AND ");
+      
+      // Prepare parameters (each term used 3 times for name, entityType, observations)
+      const params = keywords.flatMap(term => {
+        const likePattern = `%${term}%`;
+        return [likePattern, likePattern, likePattern];
+      });
+      
+      // Add scope filter if provided
+      let scopeCondition = '';
+      const scopeParams: any[] = [];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = ' AND (name ILIKE ? OR name ILIKE ?)';
+        scopeParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+        this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
+      }
+      
+      const reader = await conn.runAndReadAll(`
+        SELECT DISTINCT name, entityType, created_at
+        FROM entity_search_view
+        WHERE ${whereConditions}${scopeCondition}
+        ORDER BY 
+          -- Prioritize exact name matches
+          CASE WHEN name ILIKE ? THEN 1
+               WHEN entityType ILIKE ? THEN 2
+               ELSE 3 END,
+          created_at DESC
+        LIMIT 500
+      `, [...params, ...scopeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
+      
+      const rows = reader.getRows();
+      const entities: Entity[] = [];
+      
+      for (const row of rows) {
+        const name = row[0] as string;
+        const entityType = row[1] as string;
+        const created_at = row[2];
+        
+        // Get observations for this entity
+        const obsReader = await conn.runAndReadAll(
+          "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
+          [name]
+        );
+        const obsRows = obsReader.getRows();
+        const observations = obsRows.map(obsRow => obsRow[0] as string);
+        
+        entities.push({
+          name,
+          entityType,
+          createdAt: convertTimestampToISOWithFallback(created_at),
+          observations
+        });
+      }
+      
+      this.logger.debug(`Multi-keyword FTS search for [${keywords.join(", ")}] returned ${entities.length} entities`);
+      return entities;
+    } catch (error) {
+      this.logger.error("Error in multi-keyword FTS search", extractError(error));
+      return [];
+    }
+  }
+
+  /**
+   * Search using SQL LIKE queries with multiple keywords for smaller datasets
+   */
+  private async searchWithMultiKeywordLike(keywords: string[], scope?: string): Promise<Entity[]> {
+    try {
+      const conn = await this.getConnection();
+      
+      if (keywords.length === 0) {
+        return [];
+      }
+      
+      // Build dynamic WHERE clause for multiple search terms (AND logic)
+      // SECURITY NOTE: This dynamic SQL construction is safe because:
+      // 1. whereConditions contains only fixed template strings with ? placeholders
+      // 2. All user input is passed through prepared statement parameters
+      // 3. No direct string concatenation of user data occurs
+      const whereConditions = keywords.map(() => 
+        "(e.name ILIKE ? OR e.entityType ILIKE ? OR o.content ILIKE ?)"
+      ).join(" AND ");
+      
+      // Prepare parameters (each term used 3 times for name, entityType, content)
+      const params = keywords.flatMap(term => {
+        const likePattern = `%${term}%`;
+        return [likePattern, likePattern, likePattern];
+      });
+      
+      // Add scope filter if provided
+      let scopeCondition = '';
+      const scopeParams: any[] = [];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = ' AND (e.name ILIKE ? OR e.name ILIKE ?)';
+        scopeParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+        this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
+      }
+      
+      const reader = await conn.runAndReadAll(`
+        SELECT DISTINCT e.name, e.entityType, e.created_at
+        FROM entities e
+        LEFT JOIN observations o ON e.name = o.entityName
+        WHERE ${whereConditions}${scopeCondition}
+        ORDER BY 
+          -- Prioritize exact name matches
+          CASE WHEN e.name ILIKE ? THEN 1
+               WHEN e.entityType ILIKE ? THEN 2
+               ELSE 3 END,
+          e.created_at DESC
+        LIMIT 500
+      `, [...params, ...scopeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
+      
+      const rows = reader.getRows();
+      const entities: Entity[] = [];
+      
+      for (const row of rows) {
+        const name = row[0] as string;
+        const entityType = row[1] as string;
+        const created_at = row[2];
+        
+        // Get observations for this entity
+        const obsReader = await conn.runAndReadAll(
+          "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
+          [name]
+        );
+        const obsRows = obsReader.getRows();
+        const observations = obsRows.map(obsRow => obsRow[0] as string);
+        
+        entities.push({
+          name,
+          entityType,
+          createdAt: convertTimestampToISOWithFallback(created_at),
+          observations
+        });
+      }
+      
+      this.logger.debug(`Multi-keyword LIKE search for [${keywords.join(", ")}] returned ${entities.length} entities`);
+      return entities;
+    } catch (error) {
+      this.logger.error("Error in multi-keyword LIKE search", extractError(error));
+      return [];
+    }
   }
 
   /**
@@ -871,6 +1797,102 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     } catch (error: unknown) {
       this.logger.error("Error opening nodes", extractError(error));
       return { entities: [], relations: [] };
+    }
+  }
+
+  /**
+   * Read the entire knowledge graph
+   * @returns The complete knowledge graph
+   */
+  async readGraph(): Promise<KnowledgeGraph> {
+    try {
+      // Get all entities
+      const entities = await this.getAllEntities();
+
+      const conn = await this.getConnection();
+
+      // Get all relations
+      const relationsReader = await conn.runAndReadAll(
+        'SELECT from_entity as "from", to_entity as "to", relationType, created_at FROM relations'
+      );
+      const relationsData = relationsReader.getRows();
+
+      // Convert results to an array of Relation objects
+      const relations = relationsData.map((row) => {
+        const created_at = row[3];
+        return {
+          from: row[0] as string,
+          to: row[1] as string,
+          relationType: row[2] as string,
+          createdAt: convertTimestampToISOWithFallback(created_at)
+        };
+      });
+      
+      return {
+        entities,
+        relations,
+      };
+    } catch (error) {
+      this.logger.error("Error in readGraph", extractError(error));
+      throw error;
+    }
+  }
+
+  /**
+   * Schedule FTS index rebuild with debounce to avoid frequent rebuilds
+   * Uses a 5-second debounce timer to batch multiple data changes
+   */
+  private async scheduleIndexRebuild(): Promise<void> {
+    // Skip if FTS is not enabled
+    if (!this.ftsEnabled) {
+      this.logger.debug("FTS not enabled, skipping index rebuild scheduling");
+      return;
+    }
+
+    // Skip if manager is closed
+    if (this.closed) {
+      this.logger.debug("Manager is closed, skipping index rebuild scheduling");
+      return;
+    }
+
+    // Skip if current entity count is below FTS threshold
+    try {
+      const entityCount = await this.getEntityCount();
+      if (entityCount < this.entityCountThreshold) {
+        this.logger.debug(`Entity count (${entityCount}) below FTS threshold (${this.entityCountThreshold}), skipping index rebuild`);
+        return;
+      }
+    } catch (error) {
+      this.logger.warn("Failed to get entity count for FTS threshold check", extractError(error));
+      return;
+    }
+
+    try {
+      // Clear any existing timer to reset the debounce
+      if (this.ftsRebuildTimer) {
+        clearTimeout(this.ftsRebuildTimer);
+        this.ftsRebuildTimer = null;
+        this.logger.debug("Previous FTS rebuild timer cleared, resetting debounce");
+      }
+
+      // Schedule new rebuild with debounce
+      this.ftsRebuildTimer = setTimeout(async () => {
+        try {
+          this.logger.debug("Debounce timer expired, starting FTS index rebuild");
+          await this.rebuildFTSIndexes();
+          this.ftsRebuildTimer = null;
+          this.logger.info("Scheduled FTS index rebuild completed successfully");
+        } catch (error) {
+          this.ftsRebuildTimer = null;
+          // Log error but don't throw to prevent disrupting the main flow
+          this.logger.error("Failed to rebuild FTS indexes in scheduled task", extractError(error));
+        }
+      }, DuckDBKnowledgeGraphManager.FTS_REBUILD_DEBOUNCE_MS);
+
+      this.logger.debug(`FTS index rebuild scheduled with ${DuckDBKnowledgeGraphManager.FTS_REBUILD_DEBOUNCE_MS}ms debounce`);
+    } catch (error) {
+      // Handle any timer-related errors gracefully
+      this.logger.error("Error scheduling FTS index rebuild", extractError(error));
     }
   }
 }

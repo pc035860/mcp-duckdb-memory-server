@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { DuckDBKnowledgeGraphManager } from "../src/manager";
+import { DuckDBKnowledgeGraphManager } from "../src/managers/duckdb-manager";
 import { Entity, Relation, Observation } from "../src/types";
 import { join } from "path";
 import { existsSync, unlinkSync } from "fs";
 
 describe("DuckDBFuseKnowledgeGraphManager", () => {
-  // Test file path
-  const testDbPath = join(process.cwd(), "tmp", "test-knowledge-graph.db");
+  // Test file path - unique for each test to avoid conflicts
+  let testDbPath: string;
   let manager: DuckDBKnowledgeGraphManager;
 
   // More realistic test data
@@ -99,15 +99,33 @@ describe("DuckDBFuseKnowledgeGraphManager", () => {
 
   // Run before each test
   beforeEach(async () => {
+    // Generate unique test database path for each test
+    const testId = Math.random().toString(36).substring(7);
+    testDbPath = join(process.cwd(), "tmp", `test-knowledge-graph-${testId}.db`);
+    
     // Create test manager
     manager = new DuckDBKnowledgeGraphManager(() => testDbPath);
+    await manager.initialize();
   });
 
   // Run after each test
-  afterEach(() => {
+  afterEach(async () => {
+    // Close manager if still open
+    if (manager && !manager.isClosed) {
+      try {
+        await manager.close();
+      } catch (error) {
+        // Ignore close errors
+      }
+    }
+    
     // Delete test file
     if (existsSync(testDbPath)) {
-      unlinkSync(testDbPath);
+      try {
+        unlinkSync(testDbPath);
+      } catch (error) {
+        // Ignore cleanup errors
+      }
     }
   });
 
@@ -520,6 +538,136 @@ describe("DuckDBFuseKnowledgeGraphManager", () => {
         johnSmith!.observations.some(
           (obs) => obs.includes("TypeScript") && obs.includes("React")
         )
+      ).toBe(true);
+    });
+
+    it("should filter entities by scope", async () => {
+      // Create entities with different scopes
+      const scopedEntities: Entity[] = [
+        {
+          name: "merp-frontend:product-import-hooks",
+          entityType: "module",
+          observations: ["Handles product import operations"]
+        },
+        {
+          name: "[merp-frontend]:product-import-constants",
+          entityType: "constants",
+          observations: ["Constants for product import"]
+        },
+        {
+          name: "merp-backend:product-api",
+          entityType: "api",
+          observations: ["Product API endpoints"]
+        },
+        {
+          name: "ecerp:Product API Analysis",
+          entityType: "analysis",
+          observations: ["Analysis of product API"]
+        },
+        {
+          name: "general-utility",
+          entityType: "utility",
+          observations: ["General utility functions"]
+        }
+      ];
+      
+      await manager.createEntities(scopedEntities);
+
+      // Search with scope filter
+      const results = await manager.searchNodes("product", { scope: "merp-frontend" });
+
+      // Verify results only contain entities with the specified scope
+      expect(results.entities.length).toBe(2);
+      expect(
+        results.entities.every(entity => 
+          entity.name.startsWith("merp-frontend:") || 
+          entity.name.startsWith("[merp-frontend]:")
+        )
+      ).toBe(true);
+      
+      // Verify specific entities are included
+      expect(
+        results.entities.some(entity => entity.name === "merp-frontend:product-import-hooks")
+      ).toBe(true);
+      expect(
+        results.entities.some(entity => entity.name === "[merp-frontend]:product-import-constants")
+      ).toBe(true);
+      
+      // Verify entities from other scopes are excluded
+      expect(
+        results.entities.some(entity => entity.name === "merp-backend:product-api")
+      ).toBe(false);
+      expect(
+        results.entities.some(entity => entity.name === "ecerp:Product API Analysis")
+      ).toBe(false);
+    });
+
+    it("should handle scope with brackets", async () => {
+      // Create entities
+      const scopedEntities: Entity[] = [
+        {
+          name: "[project-a]:component-1",
+          entityType: "component",
+          observations: ["Component in project A"]
+        },
+        {
+          name: "project-a:component-2",
+          entityType: "component",
+          observations: ["Another component in project A"]
+        },
+        {
+          name: "[project-b]:component-3",
+          entityType: "component",
+          observations: ["Component in project B"]
+        }
+      ];
+      
+      await manager.createEntities(scopedEntities);
+
+      // Search with bracketed scope
+      const results = await manager.searchNodes("component", { scope: "[project-a]" });
+
+      // Should find both variations of project-a scope
+      expect(results.entities.length).toBe(2);
+      expect(
+        results.entities.some(entity => entity.name === "[project-a]:component-1")
+      ).toBe(true);
+      expect(
+        results.entities.some(entity => entity.name === "project-a:component-2")
+      ).toBe(true);
+    });
+
+    it("should return empty results when no entities match scope", async () => {
+      // Create entities
+      const entities: Entity[] = [
+        {
+          name: "project-a:component",
+          entityType: "component",
+          observations: ["Component description"]
+        }
+      ];
+      
+      await manager.createEntities(entities);
+
+      // Search with non-matching scope
+      const results = await manager.searchNodes("component", { scope: "project-b" });
+
+      // Should return empty results
+      expect(results.entities.length).toBe(0);
+      expect(results.relations.length).toBe(0);
+    });
+
+    it("should work without scope (backward compatibility)", async () => {
+      // Create entities
+      await createTestData();
+
+      // Search without scope (should work as before)
+      const results = await manager.searchNodes("John Smith");
+
+      // Verify results
+      expect(results.entities.length).toBeGreaterThan(0);
+      expect(
+        results.entities.some((entity) => entity.name === "John Smith")
       ).toBe(true);
     });
   });

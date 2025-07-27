@@ -4,6 +4,7 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  SearchNodesOptions,
 } from "../types";
 
 /**
@@ -52,9 +53,10 @@ export interface KnowledgeGraphManagerInterface {
   /**
    * Search for entities
    * @param query Search query
+   * @param options Optional search options including scope filter
    * @returns Knowledge graph with matching entities and their relations
    */
-  searchNodes(query: string): Promise<KnowledgeGraph>;
+  searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph>;
 
   /**
    * Search for entities using multiple keywords
@@ -75,6 +77,12 @@ export interface KnowledgeGraphManagerInterface {
   openNodes(names: string[]): Promise<KnowledgeGraph>;
 
   /**
+   * Read the entire knowledge graph
+   * @returns The complete knowledge graph
+   */
+  readGraph(): Promise<KnowledgeGraph>;
+
+  /**
    * Initialize the manager
    */
   initialize(): Promise<void>;
@@ -83,4 +91,29 @@ export interface KnowledgeGraphManagerInterface {
    * Close and cleanup resources
    */
   close(): Promise<void>;
+
+  /**
+   * Rebuild FTS indexes for maintenance or after bulk data changes
+   */
+  rebuildFTSIndexes(): Promise<void>;
+
+  /**
+   * Check FTS index health and status
+   */
+  checkFTSIndexHealth(): Promise<{
+    ftsEnabled: boolean;
+    entitiesIndexed: number;
+    observationsIndexed: number;
+    status: string;
+  }>;
+
+  /**
+   * Get FTS configuration and statistics
+   */
+  getFTSInfo(): Promise<{
+    enabled: boolean;
+    extensionLoaded: boolean;
+    searchStrategy: string;
+    indexCount: number;
+  }>;
 }
