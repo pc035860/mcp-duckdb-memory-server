@@ -226,6 +226,12 @@ export class SecondaryServer {
               .max(1)
               .optional()
               .describe("Search threshold for fuzzy matching (0-1, closer to 0 is more strict)"),
+            scope: z
+              .string()
+              .optional()
+              .describe(
+                "Optional scope to filter entities, e.g., 'project' or '[project]'"
+              ),
           })
           .optional()
           .describe("Search options"),

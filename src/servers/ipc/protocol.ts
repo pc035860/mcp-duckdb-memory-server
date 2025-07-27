@@ -20,6 +20,7 @@ export type IPCRequest =
   | SearchNodesRequest
   | SearchMultiKeywordsRequest
   | OpenNodesRequest
+  | ReadGraphRequest
   | CheckpointRequest
   | RebuildFTSIndexesRequest
   | CheckFTSIndexHealthRequest
@@ -136,6 +137,14 @@ export interface OpenNodesRequest extends BaseRequest {
 }
 
 /**
+ * Read graph request
+ */
+export interface ReadGraphRequest extends BaseRequest {
+  type: "read_graph";
+  payload: {};
+}
+
+/**
  * Checkpoint request
  */
 export interface CheckpointRequest extends BaseRequest {
@@ -204,6 +213,10 @@ export function isSearchMultiKeywordsRequest(req: IPCRequest): req is SearchMult
 
 export function isOpenNodesRequest(req: IPCRequest): req is OpenNodesRequest {
   return req.type === "open_nodes";
+}
+
+export function isReadGraphRequest(req: IPCRequest): req is ReadGraphRequest {
+  return req.type === "read_graph";
 }
 
 export function isCheckpointRequest(req: IPCRequest): req is CheckpointRequest {

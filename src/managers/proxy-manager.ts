@@ -149,6 +149,16 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
   }
 
   /**
+   * Read the entire knowledge graph
+   */
+  async readGraph(): Promise<KnowledgeGraph> {
+    return await this.client.sendRequest({
+      type: "read_graph",
+      payload: {},
+    });
+  }
+
+  /**
    * Rebuild FTS indexes for maintenance or after bulk data changes
    */
   async rebuildFTSIndexes(): Promise<void> {

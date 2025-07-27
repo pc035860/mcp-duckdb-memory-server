@@ -775,20 +775,31 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       let entities: Entity[] = [];
       
+      // Extract scope from options
+      const scope = options?.scope;
+      
       if (entityCount < this.entityCountThreshold) {
         // Small dataset: use SQL LIKE search with multiple keywords
-        this.logger.debug("Using LIKE search for multi-keyword search");
-        entities = await this.searchWithMultiKeywordLike(validKeywords);
+        this.logger.debug(`Using LIKE search for multi-keyword search${scope ? ` with scope: ${scope}` : ''}`);
+        entities = await this.searchWithMultiKeywordLike(validKeywords, scope);
       } else {
         // Large dataset: use FTS search with multiple keywords
-        this.logger.debug("Using FTS search for multi-keyword search");
-        entities = await this.searchWithMultiKeywordFTS(validKeywords);
+        this.logger.debug(`Using FTS search for multi-keyword search${scope ? ` with scope: ${scope}` : ''}`);
+        entities = await this.searchWithMultiKeywordFTS(validKeywords, scope);
       }
       
       // Fallback to Fuse.js if database search returns no results
       if (entities.length === 0) {
         this.logger.debug("Database search returned no results, falling back to Fuse.js");
-        const allEntities = await this.getAllEntities();
+        let allEntities = await this.getAllEntities();
+        
+        // Apply scope filter if provided
+        if (scope) {
+          const cleanScope = scope.replace(/[\[\]]/g, '');
+          const scopePattern = new RegExp(`^(${cleanScope}|\\[${cleanScope}\\]):`);
+          allEntities = allEntities.filter(entity => scopePattern.test(entity.name));
+        }
+        
         this.fuse.setCollection(allEntities);
         return await this._performMultiKeywordSearch(validKeywords, options);
       }
@@ -1546,7 +1557,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using FTS approach with multiple keywords for large datasets
    */
-  private async searchWithMultiKeywordFTS(keywords: string[]): Promise<Entity[]> {
+  private async searchWithMultiKeywordFTS(keywords: string[], scope?: string): Promise<Entity[]> {
     try {
       const conn = await this.getConnection();
       
@@ -1569,10 +1580,22 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         return [likePattern, likePattern, likePattern];
       });
       
+      // Add scope filter if provided
+      let scopeCondition = '';
+      const scopeParams: any[] = [];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = ' AND (name ILIKE ? OR name ILIKE ?)';
+        scopeParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+        this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
+      }
+      
       const reader = await conn.runAndReadAll(`
         SELECT DISTINCT name, entityType, created_at
         FROM entity_search_view
-        WHERE ${whereConditions}
+        WHERE ${whereConditions}${scopeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN name ILIKE ? THEN 1
@@ -1580,7 +1603,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
                ELSE 3 END,
           created_at DESC
         LIMIT 500
-      `, [...params, `%${keywords[0]}%`, `%${keywords[0]}%`]);
+      `, [...params, ...scopeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
       
       const rows = reader.getRows();
       const entities: Entity[] = [];
@@ -1617,7 +1640,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using SQL LIKE queries with multiple keywords for smaller datasets
    */
-  private async searchWithMultiKeywordLike(keywords: string[]): Promise<Entity[]> {
+  private async searchWithMultiKeywordLike(keywords: string[], scope?: string): Promise<Entity[]> {
     try {
       const conn = await this.getConnection();
       
@@ -1640,11 +1663,23 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         return [likePattern, likePattern, likePattern];
       });
       
+      // Add scope filter if provided
+      let scopeCondition = '';
+      const scopeParams: any[] = [];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = ' AND (e.name ILIKE ? OR e.name ILIKE ?)';
+        scopeParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+        this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
+      }
+      
       const reader = await conn.runAndReadAll(`
         SELECT DISTINCT e.name, e.entityType, e.created_at
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
-        WHERE ${whereConditions}
+        WHERE ${whereConditions}${scopeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN e.name ILIKE ? THEN 1
@@ -1652,7 +1687,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
                ELSE 3 END,
           e.created_at DESC
         LIMIT 500
-      `, [...params, `%${keywords[0]}%`, `%${keywords[0]}%`]);
+      `, [...params, ...scopeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
       
       const rows = reader.getRows();
       const entities: Entity[] = [];

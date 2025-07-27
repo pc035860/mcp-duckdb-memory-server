@@ -16,6 +16,7 @@ import {
   isSearchNodesRequest,
   isSearchMultiKeywordsRequest,
   isOpenNodesRequest,
+  isReadGraphRequest,
   isCheckpointRequest,
   isRebuildFTSIndexesRequest,
   isCheckFTSIndexHealthRequest,
@@ -191,6 +192,10 @@ export class MainServer {
 
       if (isOpenNodesRequest(request)) {
         return await this.manager.openNodes(request.payload.names);
+      }
+
+      if (isReadGraphRequest(request)) {
+        return await this.manager.readGraph();
       }
 
       if (isCheckpointRequest(request)) {
