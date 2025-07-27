@@ -3,10 +3,11 @@ import { DuckDBKnowledgeGraphManager } from "../src/managers/duckdb-manager";
 import { Entity, Observation } from "../src/types";
 import { join } from "path";
 import { existsSync, unlinkSync, mkdirSync } from "fs";
+import { generateUniqueDbPath, cleanupTestDb, safeCloseManager } from "./test-utils.js";
 
 describe("FTS Debounce 自動重建機制", () => {
-  // 測試檔案路徑
-  const testDbPath = join(process.cwd(), "tmp", "test-fts-debounce.db");
+  // 測試檔案路徑 - will be set uniquely for each test
+  let testDbPath: string;
   let manager: DuckDBKnowledgeGraphManager;
 
   // 測試資料
@@ -14,12 +15,14 @@ describe("FTS Debounce 自動重建機制", () => {
     {
       name: "Test Entity 1",
       entityType: "TestType",
-      observations: ["Test observation 1", "Another test observation"]
+      observations: ["Test observation 1", "Another test observation"],
+      createdAt: "2025-01-01T00:00:00Z"
     },
     {
       name: "Test Entity 2", 
       entityType: "TestType",
-      observations: ["Test observation 2"]
+      observations: ["Test observation 2"],
+      createdAt: "2025-01-01T00:00:00Z"
     }
   ];
 
@@ -43,10 +46,11 @@ describe("FTS Debounce 自動重建機制", () => {
   });
 
   beforeEach(async () => {
+    // Use unique path for each test to avoid conflicts
+    testDbPath = generateUniqueDbPath("fts-debounce");
+    
     // 清理現有測試檔案
-    if (existsSync(testDbPath)) {
-      unlinkSync(testDbPath);
-    }
+    await cleanupTestDb(testDbPath);
 
     // 使用低閾值確保 FTS 啟用（設為 0 以總是使用 FTS）
     manager = new DuckDBKnowledgeGraphManager(() => testDbPath, undefined, false, 0);
@@ -63,17 +67,12 @@ describe("FTS Debounce 自動重建機制", () => {
   afterEach(async () => {
     vi.useRealTimers();
 
-    if (manager && !manager.closed) {
-      await manager.close();
-    }
+    // Safe close manager
+    await safeCloseManager(manager);
 
-    // 清理測試檔案
-    if (existsSync(testDbPath)) {
-      try {
-        unlinkSync(testDbPath);
-      } catch (error) {
-        // 忽略清理錯誤
-      }
+    // Clean up test files
+    if (testDbPath) {
+      await cleanupTestDb(testDbPath);
     }
 
     vi.clearAllMocks();

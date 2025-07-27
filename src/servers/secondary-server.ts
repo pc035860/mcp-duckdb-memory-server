@@ -181,13 +181,19 @@ export class SecondaryServer {
           .describe(
             "The search query to match against entity names, types, and observation content"
           ),
+        scope: z
+          .string()
+          .optional()
+          .describe(
+            "Optional scope to filter entities, e.g., 'project' or '[project]'"
+          ),
       },
-      async ({ query }) => ({
+      async ({ query, scope }) => ({
         content: [
           {
             type: "text",
             text: JSON.stringify(
-              await this.manager.searchNodes(query),
+              await this.manager.searchNodes(query, scope ? { scope } : undefined),
               null,
               2
             ),

@@ -4,6 +4,7 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  SearchNodesOptions,
 } from "../../types";
 
 /**
@@ -109,6 +110,7 @@ export interface SearchNodesRequest extends BaseRequest {
   type: "search_nodes";
   payload: {
     query: string;
+    options?: SearchNodesOptions;
   };
 }
 

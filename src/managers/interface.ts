@@ -4,6 +4,7 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  SearchNodesOptions,
 } from "../types";
 
 /**
@@ -52,9 +53,10 @@ export interface KnowledgeGraphManagerInterface {
   /**
    * Search for entities
    * @param query Search query
+   * @param options Optional search options including scope filter
    * @returns Knowledge graph with matching entities and their relations
    */
-  searchNodes(query: string): Promise<KnowledgeGraph>;
+  searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph>;
 
   /**
    * Search for entities using multiple keywords
@@ -73,6 +75,12 @@ export interface KnowledgeGraphManagerInterface {
    * @returns Knowledge graph with matching entities and their relations
    */
   openNodes(names: string[]): Promise<KnowledgeGraph>;
+
+  /**
+   * Read the entire knowledge graph
+   * @returns The complete knowledge graph
+   */
+  readGraph(): Promise<KnowledgeGraph>;
 
   /**
    * Initialize the manager

@@ -70,6 +70,13 @@ export type MultiKeywordSearchOptions = {
 };
 
 /**
+ * Options for searchNodes method
+ */
+export type SearchNodesOptions = {
+  scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
+};
+
+/**
  * The KnowledgeGraphManagerInterface is the primary interface for interacting with the knowledge graph
  */
 export type KnowledgeGraphManagerInterface = {
@@ -79,7 +86,7 @@ export type KnowledgeGraphManagerInterface = {
   deleteEntities(entityNames: string[]): Promise<void>;
   deleteObservations(deletions: Array<Observation>): Promise<void>;
   deleteRelations(relations: Relation[]): Promise<void>;
-  searchNodes(query: string): Promise<KnowledgeGraph>;
+  searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph>;
   searchMultiKeywords(keywords: string[], options?: MultiKeywordSearchOptions): Promise<KnowledgeGraph>;
   openNodes(names: string[]): Promise<KnowledgeGraph>;
 };

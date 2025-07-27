@@ -179,7 +179,7 @@ export class MainServer {
       }
 
       if (isSearchNodesRequest(request)) {
-        return await this.manager.searchNodes(request.payload.query);
+        return await this.manager.searchNodes(request.payload.query, request.payload.options);
       }
 
       if (isSearchMultiKeywordsRequest(request)) {

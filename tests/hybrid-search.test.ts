@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { DuckDBKnowledgeGraphManager } from "../src/manager";
-import { Entity, Relation } from "../src/types";
+import { DuckDBKnowledgeGraphManager } from "../src/managers/duckdb-manager";
+import { Entity, Relation, SearchNodesOptions } from "../src/types";
 import { join } from "path";
 import { existsSync, unlinkSync } from "fs";
 
@@ -511,6 +511,175 @@ describe("DuckDBKnowledgeGraphManager - Hybrid Search", () => {
         expect(typeof relation.relationType).toBe("string");
         expect(typeof relation.createdAt).toBe("string");
       }
+    });
+  });
+
+  describe("Scope Filtering", () => {
+    const scopedDataset: Entity[] = [
+      {
+        name: "project-a:user-service",
+        entityType: "service",
+        observations: ["User authentication for project A", "Built with Node.js"]
+      },
+      {
+        name: "[project-a]:auth-middleware",
+        entityType: "middleware",
+        observations: ["JWT validation middleware", "Project A specific auth"]
+      },
+      {
+        name: "project-b:user-service",
+        entityType: "service", 
+        observations: ["User management for project B", "Built with Python"]
+      },
+      {
+        name: "[project-b]:payment-service",
+        entityType: "service",
+        observations: ["Payment processing service", "Stripe integration"]
+      },
+      {
+        name: "global-config",
+        entityType: "configuration",
+        observations: ["Global configuration settings", "No project scope"]
+      }
+    ];
+
+    beforeEach(async () => {
+      // Ensure clean state - close and reinitialize
+      await manager.close();
+      if (existsSync(testDbPath)) {
+        unlinkSync(testDbPath);
+      }
+      manager = new DuckDBKnowledgeGraphManager(() => testDbPath);
+      await manager.initialize();
+      
+      // Now add scoped test data
+      await manager.createEntities(scopedDataset);
+    });
+
+    it("should filter entities by scope using project: format", async () => {
+      const options: SearchNodesOptions = { scope: "project-a" };
+      const result = await manager.searchNodes("user", options);
+
+      expect(result.entities.length).toBeGreaterThan(0);
+      
+      // Should only find project-a entities
+      const projectAEntities = result.entities.filter(e => e.name.startsWith("project-a:"));
+      expect(projectAEntities.length).toBeGreaterThan(0);
+      
+      // Should not find project-b entities
+      const projectBEntities = result.entities.filter(e => e.name.startsWith("project-b:"));
+      expect(projectBEntities.length).toBe(0);
+      
+      // Should find the specific user service for project A
+      const userService = result.entities.find(e => e.name === "project-a:user-service");
+      expect(userService).toBeDefined();
+    });
+
+    it("should filter entities by scope using [project]: format", async () => {
+      const options: SearchNodesOptions = { scope: "project-a" };
+      const result = await manager.searchNodes("auth", options);
+
+      expect(result.entities.length).toBeGreaterThan(0);
+      
+      // Should find entities with [project-a]: format
+      const authMiddleware = result.entities.find(e => e.name === "[project-a]:auth-middleware");
+      expect(authMiddleware).toBeDefined();
+      
+      // Should not find project-b entities
+      const projectBEntities = result.entities.filter(e => e.name.includes("project-b"));
+      expect(projectBEntities.length).toBe(0);
+    });
+
+    it("should support scope with brackets in scope parameter", async () => {
+      const options: SearchNodesOptions = { scope: "[project-b]" };
+      const result = await manager.searchNodes("payment", options);
+
+      expect(result.entities.length).toBeGreaterThan(0);
+      
+      // Should find the payment service
+      const paymentService = result.entities.find(e => e.name === "[project-b]:payment-service");
+      expect(paymentService).toBeDefined();
+      
+      // Should not find project-a entities
+      const projectAEntities = result.entities.filter(e => e.name.includes("project-a"));
+      expect(projectAEntities.length).toBe(0);
+    });
+
+    it("should return empty results when scope has no matching entities", async () => {
+      const options: SearchNodesOptions = { scope: "nonexistent-project" };
+      const result = await manager.searchNodes("user", options);
+
+      expect(result.entities.length).toBe(0);
+      expect(result.relations.length).toBe(0);
+    });
+
+    it("should work without scope parameter (backward compatibility)", async () => {
+      const result = await manager.searchNodes("user");
+
+      expect(result.entities.length).toBeGreaterThan(0);
+      
+      // Should find entities from both projects
+      const projectAUser = result.entities.find(e => e.name === "project-a:user-service");
+      const projectBUser = result.entities.find(e => e.name === "project-b:user-service");
+      
+      expect(projectAUser).toBeDefined();
+      expect(projectBUser).toBeDefined();
+    });
+
+    it("should filter entities by scope with case insensitive matching", async () => {
+      const options: SearchNodesOptions = { scope: "PROJECT-A" };
+      const result = await manager.searchNodes("user", options);
+
+      expect(result.entities.length).toBeGreaterThan(0);
+      
+      // Should find project-a entities despite case difference
+      const userService = result.entities.find(e => e.name === "project-a:user-service");
+      expect(userService).toBeDefined();
+    });
+
+    it("should work with large datasets and scope filtering", async () => {
+      // Create large dataset with scoped entities
+      const largeDataset: Entity[] = [];
+      for (let i = 0; i < 1100; i++) {
+        const scope = i % 2 === 0 ? "large-project-a" : "large-project-b";
+        largeDataset.push({
+          name: `${scope}:entity-${i}`,
+          entityType: i % 10 === 0 ? "important" : "regular",
+          observations: [`Entity ${i} for ${scope}`, "Test data"]
+        });
+      }
+      
+      await manager.createEntities(largeDataset);
+      
+      const options: SearchNodesOptions = { scope: "large-project-a" };
+      const startTime = Date.now();
+      const result = await manager.searchNodes("entity", options);
+      const searchTime = Date.now() - startTime;
+
+      // Should complete in reasonable time
+      expect(searchTime).toBeLessThan(1000);
+      
+      // Should only find project-a entities
+      expect(result.entities.length).toBeGreaterThan(0);
+      for (const entity of result.entities) {
+        expect(entity.name).toMatch(/^large-project-a:/);
+      }
+    });
+
+    it("should handle scope filtering with Fuse.js fallback", async () => {
+      // Test with a query that might not match directly in database search
+      const options: SearchNodesOptions = { scope: "project-a" };
+      const result = await manager.searchNodes("Node.js authentication", options);
+
+      // Should find project-a entities even if falling back to Fuse.js
+      const foundEntities = result.entities.filter(e => e.name.includes("project-a"));
+      expect(foundEntities.length).toBeGreaterThan(0);
+      
+      // Should not find entities from other projects
+      const otherProjectEntities = result.entities.filter(e => 
+        e.name.includes("project-b") || e.name === "global-config"
+      );
+      expect(otherProjectEntities.length).toBe(0);
     });
   });
 });

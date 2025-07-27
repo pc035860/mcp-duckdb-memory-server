@@ -303,19 +303,27 @@ class DuckDBMergeTool {
       } catch (innerError) {
         // Rollback on any error during the merge
         try {
-          await outputConn.run("ROLLBACK");
+          // Check if we're in a transaction before rolling back
+          const result = await outputConn.runAndReadAll("SELECT 1 WHERE txid_current() IS NOT NULL");
+          if (result.getRows().length > 0) {
+            await outputConn.run("ROLLBACK");
+          }
         } catch (rollbackError) {
-          this.logger.error("Failed to rollback transaction", { error: rollbackError });
+          this.logger.debug("Failed to rollback transaction (may not be in transaction)", { error: rollbackError });
         }
         throw innerError;
       }
       
     } catch (error) {
-      // Rollback on error
+      // Rollback on error if in transaction
       try {
-        await outputConn.run("ROLLBACK");
+        // Check if we're in a transaction before rolling back
+        const result = await outputConn.runAndReadAll("SELECT 1 WHERE txid_current() IS NOT NULL");
+        if (result.getRows().length > 0) {
+          await outputConn.run("ROLLBACK");
+        }
       } catch (rollbackError) {
-        this.logger.error("Failed to rollback transaction", { error: rollbackError });
+        this.logger.debug("Failed to rollback transaction (may not be in transaction)", { error: rollbackError });
       }
       throw error;
     } finally {

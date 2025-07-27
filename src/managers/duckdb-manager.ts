@@ -4,6 +4,7 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  SearchNodesOptions,
   DatabaseRow,
 } from "../types";
 import { KnowledgeGraphManagerInterface } from "./interface";
@@ -179,6 +180,13 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.logger.error("Error during manual checkpoint", extractError(error));
       throw error;
     }
+  }
+
+  /**
+   * Check if the manager is closed
+   */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   /**
@@ -657,7 +665,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
    * - Large datasets (≥ 1000 entities): Use optimized FTS search
    * - Fallback: Use Fuse.js fuzzy search if database search fails
    */
-  async searchNodes(query: string): Promise<KnowledgeGraph> {
+  async searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph> {
     try {
       if (!query || query.trim() === "") {
         return { entities: [], relations: [] };
@@ -665,25 +673,36 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       let entities: Entity[] = [];
       
+      // Extract scope from options
+      const scope = options?.scope;
+      
       // Get entity count to determine search strategy
       const entityCount = await this.getEntityCount();
-      this.logger.debug(`Entity count: ${entityCount}, choosing search strategy`);
+      this.logger.debug(`Entity count: ${entityCount}, choosing search strategy${scope ? ` with scope: ${scope}` : ''}`);
       
       // Choose search strategy based on dataset size
       if (entityCount < this.entityCountThreshold) {
         // Small dataset: use SQL LIKE search
         this.logger.debug("Using LIKE search for small dataset");
-        entities = await this.searchWithLike(query);
+        entities = await this.searchWithLike(query, scope);
       } else {
         // Large dataset: use FTS search
         this.logger.debug("Using FTS search for large dataset");
-        entities = await this.searchWithFTS(query);
+        entities = await this.searchWithFTS(query, scope);
       }
       
       // Fallback to Fuse.js if database search returns no results
       if (entities.length === 0) {
         this.logger.debug("Database search returned no results, falling back to Fuse.js");
-        const allEntities = await this.getAllEntities();
+        let allEntities = await this.getAllEntities();
+        
+        // Apply scope filter if provided
+        if (scope) {
+          const cleanScope = scope.replace(/[\[\]]/g, '');
+          const scopePattern = new RegExp(`^(${cleanScope}|\\[${cleanScope}\\]):`);
+          allEntities = allEntities.filter(entity => scopePattern.test(entity.name));
+        }
+        
         this.fuse.setCollection(allEntities);
         const results = this.fuse.search(query);
         
@@ -752,7 +771,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       }
 
       // Use hybrid search strategy for better performance
-      const query = validKeywords.join(" ");
       const entityCount = await this.getEntityCount();
       
       let entities: Entity[] = [];
@@ -856,7 +874,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           }
         } else {
           const currentMatches = new Set(keywordResults.map((r) => r.item.name));
-          for (const [name, result] of allResults) {
+          for (const [name] of allResults) {
             if (!currentMatches.has(name)) {
               allResults.delete(name);
             }
@@ -1023,7 +1041,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using DuckDB Full-Text Search capabilities
    */
-  private async searchWithFTS(query: string): Promise<Entity[]> {
+  private async searchWithFTS(query: string, scope?: string): Promise<Entity[]> {
     try {
       // Sanitize query input
       const cleanQuery = query.trim();
@@ -1035,9 +1053,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       // Use different search strategies based on FTS availability
       if (this.ftsEnabled) {
-        return await this.searchWithBM25(cleanQuery, conn);
+        return await this.searchWithBM25(cleanQuery, conn, scope);
       } else {
-        return await this.searchWithLikeFallback(cleanQuery, conn);
+        return await this.searchWithLikeFallback(cleanQuery, conn, scope);
       }
       
     } catch (error) {
@@ -1050,11 +1068,22 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using DuckDB FTS BM25 algorithm (when FTS is enabled)
    */
-  private async searchWithBM25(query: string, conn: DuckDBConnection): Promise<Entity[]> {
+  private async searchWithBM25(query: string, conn: DuckDBConnection, scope?: string): Promise<Entity[]> {
     try {
       const entities: Entity[] = [];
       const entityScores = new Map<string, number>();
 
+      // Build scope filter if provided
+      let scopeCondition = '';
+      const entityParams: any[] = [query];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = 'AND (name ILIKE ? OR name ILIKE ?)';
+        entityParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+      }
+      
       // Search in entities table using BM25
       // Use CTE to avoid scalar subquery errors when match_bm25 is used in WHERE clause
       const entityReader = await conn.runAndReadAll(`
@@ -1062,13 +1091,14 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           SELECT name, entityType, created_at, 
                  fts_main_entities.match_bm25(name, ?) AS score
           FROM entities
+          WHERE 1=1 ${scopeCondition}
         )
         SELECT name, entityType, created_at, score
         FROM scored_entities
         WHERE score IS NOT NULL
         ORDER BY score DESC
         LIMIT 250
-      `, [query]);
+      `, entityParams);
 
       const entityRows = entityReader.getRows();
       for (const row of entityRows) {
@@ -1098,11 +1128,25 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Search in observations table using BM25
       // Use CTE to avoid scalar subquery errors when match_bm25 is used in WHERE clause
       // Use MAX() to aggregate scores when an entity has multiple matching observations
+      const obsParams: any[] = [query];
+      let obsJoinCondition = '';
+      
+      if (scope) {
+        // Join with entities table to apply scope filter
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        obsJoinCondition = `
+          JOIN entities e ON o.entityName = e.name
+          WHERE (e.name ILIKE ? OR e.name ILIKE ?)
+        `;
+        obsParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+      }
+      
       const obsReader = await conn.runAndReadAll(`
         WITH scored_observations AS (
-          SELECT entityName, 
-                 fts_main_observations.match_bm25(content, ?) AS score
-          FROM observations
+          SELECT o.entityName, 
+                 fts_main_observations.match_bm25(o.content, ?) AS score
+          FROM observations o
+          ${obsJoinCondition}
         )
         SELECT entityName, MAX(score) AS score
         FROM scored_observations
@@ -1110,7 +1154,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         GROUP BY entityName
         ORDER BY score DESC
         LIMIT 250
-      `, [query]);
+      `, obsParams);
 
       const obsRows = obsReader.getRows();
       for (const row of obsRows) {
@@ -1353,7 +1397,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Fallback search using ILIKE when FTS is not available
    */
-  private async searchWithLikeFallback(query: string, conn: DuckDBConnection): Promise<Entity[]> {
+  private async searchWithLikeFallback(query: string, conn: DuckDBConnection, scope?: string): Promise<Entity[]> {
     // Split query into search terms for more precise matching
     const searchTerms = query.split(/\s+/).filter(term => term.length > 0);
     
@@ -1372,10 +1416,18 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       return [likePattern, likePattern, likePattern];
     });
     
+    // Add scope filter if provided
+    let scopeCondition = '';
+    if (scope) {
+      const cleanScope = scope.replace(/[\[\]]/g, '');
+      scopeCondition = ' AND (name ILIKE ? OR name ILIKE ?)';
+      params.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+    }
+    
     const reader = await conn.runAndReadAll(`
       SELECT DISTINCT name, entityType, created_at
       FROM entity_search_view
-      WHERE ${whereConditions}
+      WHERE ${whereConditions}${scopeCondition}
       ORDER BY 
         -- Prioritize exact name matches
         CASE WHEN name ILIKE ? THEN 1
@@ -1416,18 +1468,35 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using SQL LIKE queries for smaller datasets
    */
-  private async searchWithLike(query: string): Promise<Entity[]> {
+  private async searchWithLike(query: string, scope?: string): Promise<Entity[]> {
     try {
       const conn = await this.getConnection();
       const likePattern = `%${query}%`;
       
-      const reader = await conn.runAndReadAll(`
+      // Build scope filter if provided
+      let scopeCondition = '';
+      const scopeParams: any[] = [];
+      
+      if (scope) {
+        // Support both "project:" and "[project]:" formats with case insensitive matching
+        const cleanScope = scope.replace(/[\[\]]/g, '');
+        scopeCondition = 'AND (e.name ILIKE ? OR e.name ILIKE ?)';
+        scopeParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+        this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
+      } else {
+        this.logger.debug('No scope filter applied');
+      }
+      
+      const queryParams = [likePattern, likePattern, likePattern, ...scopeParams, `%${query}%`, `%${query}%`];
+      
+      const sql = `
         SELECT DISTINCT e.name, e.entityType, e.created_at
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
-        WHERE e.name ILIKE ?
+        WHERE (e.name ILIKE ?
            OR e.entityType ILIKE ?
-           OR o.content ILIKE ?
+           OR o.content ILIKE ?)
+        ${scopeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN e.name ILIKE ? THEN 1
@@ -1435,7 +1504,11 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
                ELSE 3 END,
           e.created_at DESC
         LIMIT 500
-      `, [likePattern, likePattern, likePattern, `%${query}%`, `%${query}%`]);
+      `;
+      
+      this.logger.debug('Executing SQL:', { sql, params: queryParams });
+      
+      const reader = await conn.runAndReadAll(sql, queryParams);
       
       const rows = reader.getRows();
       const entities: Entity[] = [];
@@ -1689,6 +1762,44 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     } catch (error: unknown) {
       this.logger.error("Error opening nodes", extractError(error));
       return { entities: [], relations: [] };
+    }
+  }
+
+  /**
+   * Read the entire knowledge graph
+   * @returns The complete knowledge graph
+   */
+  async readGraph(): Promise<KnowledgeGraph> {
+    try {
+      // Get all entities
+      const entities = await this.getAllEntities();
+
+      const conn = await this.getConnection();
+
+      // Get all relations
+      const relationsReader = await conn.runAndReadAll(
+        'SELECT from_entity as "from", to_entity as "to", relationType, created_at FROM relations'
+      );
+      const relationsData = relationsReader.getRows();
+
+      // Convert results to an array of Relation objects
+      const relations = relationsData.map((row) => {
+        const created_at = row[3];
+        return {
+          from: row[0] as string,
+          to: row[1] as string,
+          relationType: row[2] as string,
+          createdAt: convertTimestampToISOWithFallback(created_at)
+        };
+      });
+      
+      return {
+        entities,
+        relations,
+      };
+    } catch (error) {
+      this.logger.error("Error in readGraph", extractError(error));
+      throw error;
     }
   }
 

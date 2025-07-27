@@ -4,6 +4,7 @@ import {
   Observation,
   KnowledgeGraph,
   MultiKeywordSearchOptions,
+  SearchNodesOptions,
 } from "../types";
 import { KnowledgeGraphManagerInterface } from "./interface";
 import { IPCSocketClient } from "../servers/ipc/socket-client";
@@ -117,10 +118,10 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
   /**
    * Search for entities
    */
-  async searchNodes(query: string): Promise<KnowledgeGraph> {
+  async searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph> {
     return await this.client.sendRequest({
       type: "search_nodes",
-      payload: { query },
+      payload: { query, options },
     });
   }
 
