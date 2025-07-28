@@ -216,16 +216,6 @@ export class SecondaryServer {
               .enum(["OR", "AND"])
               .optional()
               .describe("How to combine keywords (default: OR)"),
-            fields: z
-              .array(z.enum(["name", "entityType", "observations"]))
-              .optional()
-              .describe("Fields to search in (default: all fields)"),
-            threshold: z
-              .number()
-              .min(0)
-              .max(1)
-              .optional()
-              .describe("Search threshold for fuzzy matching (0-1, closer to 0 is more strict)"),
             scope: z
               .string()
               .optional()

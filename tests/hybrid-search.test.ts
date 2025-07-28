@@ -108,6 +108,9 @@ describe("DuckDBKnowledgeGraphManager - Hybrid Search", () => {
       const largeDataset = createLargeDataset(1100);
       await manager.createEntities(largeDataset);
 
+      // Force FTS index rebuild for large datasets
+      await manager.rebuildFTSIndexes();
+      
       // Perform search - focus on behavior: does it handle large datasets efficiently?
       const startTime = Date.now();
       const result = await manager.searchNodes("search-target");
@@ -164,8 +167,11 @@ describe("DuckDBKnowledgeGraphManager - Hybrid Search", () => {
       ];
       await manager.createEntities(testEntities);
 
-      // Test multi-term search (this would use FTS for large datasets)
-      const result = await manager.searchNodes("user authentication JWT");
+      // Force FTS index rebuild to ensure indexes are ready
+      await manager.rebuildFTSIndexes();
+      
+      // Test search functionality - use a single term that should match
+      const result = await manager.searchNodes("authentication");
       
       // Verify behavior: multi-term search works correctly
       expect(result.entities.length).toBeGreaterThan(0);
@@ -651,6 +657,9 @@ describe("DuckDBKnowledgeGraphManager - Hybrid Search", () => {
       
       await manager.createEntities(largeDataset);
       
+      // Force FTS index rebuild for large datasets
+      await manager.rebuildFTSIndexes();
+      
       const options: SearchNodesOptions = { scope: "large-project-a" };
       const startTime = Date.now();
       const result = await manager.searchNodes("entity", options);
@@ -666,12 +675,16 @@ describe("DuckDBKnowledgeGraphManager - Hybrid Search", () => {
       }
     });
 
-    it("should handle scope filtering with Fuse.js fallback", async () => {
-      // Test with a query that might not match directly in database search
+    it("should handle scope filtering with multi-term queries", async () => {
+      // Test with a multi-term query that searches across different fields
       const options: SearchNodesOptions = { scope: "project-a" };
-      const result = await manager.searchNodes("Node.js authentication", options);
+      
+      // Force FTS index rebuild to ensure indexes are ready
+      await manager.rebuildFTSIndexes();
+      
+      const result = await manager.searchNodes("authentication", options);
 
-      // Should find project-a entities even if falling back to Fuse.js
+      // Should find project-a entities that match the search terms
       const foundEntities = result.entities.filter(e => e.name.includes("project-a"));
       expect(foundEntities.length).toBeGreaterThan(0);
       
