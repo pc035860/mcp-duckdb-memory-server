@@ -65,8 +65,6 @@ export type KnowledgeGraph = {
  */
 export type MultiKeywordSearchOptions = {
   mode?: 'OR' | 'AND';  // How to combine keywords, defaults to 'OR'
-  fields?: ('name' | 'entityType' | 'observations')[];  // Fields to search in, defaults to all
-  threshold?: number;  // Custom search threshold
   scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
 };
 

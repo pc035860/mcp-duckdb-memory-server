@@ -4,7 +4,7 @@ import { Entity, Relation, Observation } from "../src/types";
 import { join } from "path";
 import { existsSync, unlinkSync } from "fs";
 
-describe("DuckDBFuseKnowledgeGraphManager", () => {
+describe("DuckDBKnowledgeGraphManager", () => {
   // Test file path - unique for each test to avoid conflicts
   let testDbPath: string;
   let manager: DuckDBKnowledgeGraphManager;

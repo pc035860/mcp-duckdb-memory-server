@@ -10,7 +10,6 @@ import {
 import { KnowledgeGraphManagerInterface } from "./interface";
 import { Logger, ConsoleLogger } from "../logger";
 import { DuckDBInstance, DuckDBConnection } from "@duckdb/node-api";
-import Fuse, { FuseResult } from "fuse.js";
 import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
 import { extractError, convertTimestampToISOWithFallback } from "../utils";
@@ -21,7 +20,6 @@ import { extractError, convertTimestampToISOWithFallback } from "../utils";
 export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterface {
   private instance: DuckDBInstance | null = null;
   private connection: DuckDBConnection | null = null;
-  private fuse: Fuse<Entity>;
   private initialized: boolean = false;
   private dbPath: string;
   private logger: Logger;
@@ -46,13 +44,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     if (!existsSync(dbPathDir)) {
       mkdirSync(dbPathDir, { recursive: true });
     }
-
-    // Initialize Fuse.js
-    this.fuse = new Fuse<Entity>([], {
-      keys: ["name", "entityType", "observations"],
-      includeScore: true,
-      threshold: 0.4,
-    });
   }
 
   /**
@@ -90,12 +81,13 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE SEQUENCE IF NOT EXISTS observations_id_seq;
         CREATE TABLE IF NOT EXISTS observations (
+          id INTEGER PRIMARY KEY DEFAULT nextval('observations_id_seq'),
           entityName VARCHAR,
           content VARCHAR,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY (entityName) REFERENCES entities(name),
-          PRIMARY KEY (entityName, content)
+          FOREIGN KEY (entityName) REFERENCES entities(name)
         );
 
         CREATE TABLE IF NOT EXISTS relations (
@@ -141,6 +133,45 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           this.logger.debug("relations.created_at column already exists or failed to add", extractError(e));
         }
       }
+      
+      // Handle migration for observations table - add id column if it doesn't exist
+      try {
+        // Check if id column exists
+        const result = await this.connection.runAndReadAll(`
+          SELECT column_name FROM information_schema.columns 
+          WHERE table_name = 'observations' AND column_name = 'id'
+        `);
+        
+        if (result.getRows().length === 0) {
+          this.logger.info("Migrating observations table to add id column");
+          
+          // Create new table with id column
+          await this.connection.run(`
+            CREATE SEQUENCE IF NOT EXISTS observations_id_seq;
+            CREATE TABLE observations_new (
+              id INTEGER PRIMARY KEY DEFAULT nextval('observations_id_seq'),
+              entityName VARCHAR,
+              content VARCHAR,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY (entityName) REFERENCES entities(name)
+            )
+          `);
+          
+          // Copy data from old table
+          await this.connection.run(`
+            INSERT INTO observations_new (entityName, content, created_at)
+            SELECT entityName, content, created_at FROM observations
+          `);
+          
+          // Drop old table and rename new table
+          await this.connection.run(`DROP TABLE observations`);
+          await this.connection.run(`ALTER TABLE observations_new RENAME TO observations`);
+          
+          this.logger.info("Observations table migration completed");
+        }
+      } catch (migrationError) {
+        this.logger.debug("Observations table already has id column or migration not needed", extractError(migrationError));
+      }
 
       // Legacy data migration timestamp - intentionally hardcoded for consistency
       // This ensures all migrated records have the same timestamp for data integrity
@@ -155,10 +186,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Initialize FTS search capabilities
       await this.initializeFTS();
-
-      // Build Fuse.js index
-      const entities = await this.getAllEntities();
-      this.fuse.setCollection(entities);
 
       this.initialized = true;
       this.logger.info("DuckDB Manager initialized with persistent connection");
@@ -359,10 +386,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       await conn.run("COMMIT");
 
-      // Update Fuse.js index
-      const allEntities = await this.getAllEntities();
-      this.fuse.setCollection(allEntities);
-
       // Schedule FTS index rebuild after data changes
       await this.scheduleIndexRebuild();
 
@@ -532,10 +555,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       await conn.run("COMMIT");
 
-      // Update Fuse.js index
-      const allEntities = await this.getAllEntities();
-      this.fuse.setCollection(allEntities);
-
       // Schedule FTS index rebuild after data changes
       await this.scheduleIndexRebuild();
 
@@ -588,10 +607,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Delete entities
       await conn.run(`DELETE FROM entities WHERE name IN (${placeholders})`, entityNames);
 
-      // Update Fuse.js index
-      const allEntities = await this.getAllEntities();
-      this.fuse.setCollection(allEntities);
-
       // Schedule FTS index rebuild after data changes
       await this.scheduleIndexRebuild();
     } catch (error: unknown) {
@@ -621,10 +636,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       }
 
       await conn.run("COMMIT");
-
-      // Update Fuse.js index
-      const allEntities = await this.getAllEntities();
-      this.fuse.setCollection(allEntities);
 
       // Schedule FTS index rebuild after data changes
       await this.scheduleIndexRebuild();
@@ -663,7 +674,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
    * Search for entities using hybrid strategy
    * - Small datasets (< 1000 entities): Use SQL LIKE search
    * - Large datasets (≥ 1000 entities): Use optimized FTS search
-   * - Fallback: Use Fuse.js fuzzy search if database search fails
    */
   async searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph> {
     try {
@@ -691,29 +701,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         entities = await this.searchWithFTS(query, scope);
       }
       
-      // Fallback to Fuse.js if database search returns no results
-      if (entities.length === 0) {
-        this.logger.debug("Database search returned no results, falling back to Fuse.js");
-        let allEntities = await this.getAllEntities();
-        
-        // Apply scope filter if provided
-        if (scope) {
-          const cleanScope = scope.replace(/[\[\]]/g, '');
-          const scopePattern = new RegExp(`^(${cleanScope}|\\[${cleanScope}\\]):`);
-          allEntities = allEntities.filter(entity => scopePattern.test(entity.name));
-        }
-        
-        this.fuse.setCollection(allEntities);
-        const results = this.fuse.search(query);
-        
-        const uniqueEntities = new Map<string, Entity>();
-        for (const result of results) {
-          if (!uniqueEntities.has(result.item.name)) {
-            uniqueEntities.set(result.item.name, result.item);
-          }
-        }
-        entities = Array.from(uniqueEntities.values());
-      }
 
       const entityNames = entities.map((entity) => entity.name);
 
@@ -775,34 +762,16 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       let entities: Entity[] = [];
       
-      // Extract scope from options
-      const scope = options?.scope;
-      
       if (entityCount < this.entityCountThreshold) {
         // Small dataset: use SQL LIKE search with multiple keywords
-        this.logger.debug(`Using LIKE search for multi-keyword search${scope ? ` with scope: ${scope}` : ''}`);
-        entities = await this.searchWithMultiKeywordLike(validKeywords, scope);
+        this.logger.debug(`Using LIKE search for multi-keyword search${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+        entities = await this.searchWithMultiKeywordLike(validKeywords, options);
       } else {
         // Large dataset: use FTS search with multiple keywords
-        this.logger.debug(`Using FTS search for multi-keyword search${scope ? ` with scope: ${scope}` : ''}`);
-        entities = await this.searchWithMultiKeywordFTS(validKeywords, scope);
+        this.logger.debug(`Using FTS search for multi-keyword search${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+        entities = await this.searchWithMultiKeywordFTS(validKeywords, options);
       }
       
-      // Fallback to Fuse.js if database search returns no results
-      if (entities.length === 0) {
-        this.logger.debug("Database search returned no results, falling back to Fuse.js");
-        let allEntities = await this.getAllEntities();
-        
-        // Apply scope filter if provided
-        if (scope) {
-          const cleanScope = scope.replace(/[\[\]]/g, '');
-          const scopePattern = new RegExp(`^(${cleanScope}|\\[${cleanScope}\\]):`);
-          allEntities = allEntities.filter(entity => scopePattern.test(entity.name));
-        }
-        
-        this.fuse.setCollection(allEntities);
-        return await this._performMultiKeywordSearch(validKeywords, options);
-      }
 
       const entityNames = entities.map((entity) => entity.name);
       if (entityNames.length === 0) {
@@ -841,104 +810,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     }
   }
 
-  /**
-   * Internal method to perform multi-keyword search
-   */
-  private async _performMultiKeywordSearch(
-    keywords: string[],
-    options?: MultiKeywordSearchOptions
-  ): Promise<KnowledgeGraph> {
-    const mode = options?.mode || "OR";
-    const fields = options?.fields || ["name", "entityType", "observations"];
-
-    // Prepare search options with optional threshold
-    const searchOptions: any = {};
-    if (options?.threshold !== undefined) {
-      searchOptions.threshold = options.threshold;
-    }
-
-    let results: FuseResult<Entity>[];
-
-    if (mode === "OR") {
-      const orQuery = {
-        $or: keywords.map((keyword) => ({
-          $or: fields.map((field) => ({ [field]: keyword })),
-        })),
-      };
-      results = this.fuse.search(orQuery, searchOptions);
-    } else {
-      const allResults = new Map<string, { item: Entity; score: number }>();
-
-      for (let i = 0; i < keywords.length; i++) {
-        const keyword = keywords[i];
-        const keywordQuery = {
-          $or: fields.map((field) => ({ [field]: keyword })),
-        };
-        const keywordResults = this.fuse.search(keywordQuery, searchOptions);
-
-        if (i === 0) {
-          for (const result of keywordResults) {
-            allResults.set(result.item.name, {
-              item: result.item,
-              score: result.score!,
-            });
-          }
-        } else {
-          const currentMatches = new Set(keywordResults.map((r) => r.item.name));
-          for (const [name] of allResults) {
-            if (!currentMatches.has(name)) {
-              allResults.delete(name);
-            }
-          }
-        }
-      }
-
-      results = Array.from(allResults.values()).map((r) => ({
-        item: r.item,
-        score: r.score,
-        refIndex: 0,
-      }));
-    }
-
-    const uniqueEntities = new Map<string, Entity>();
-    for (const result of results) {
-      if (!uniqueEntities.has(result.item.name)) {
-        uniqueEntities.set(result.item.name, result.item);
-      }
-    }
-
-    const entities = Array.from(uniqueEntities.values());
-    const entityNames = entities.map((entity) => entity.name);
-
-    if (entityNames.length === 0) {
-      return { entities: [], relations: [] };
-    }
-
-    const conn = await this.getConnection();
-    const placeholders = entityNames.map(() => "?").join(",");
-    const relationsReader = await conn.runAndReadAll(
-      `
-      SELECT from_entity as "from", to_entity as "to", relationType, created_at
-      FROM relations
-      WHERE from_entity IN (${placeholders})
-      OR to_entity IN (${placeholders})
-      `,
-      [...entityNames, ...entityNames]
-    );
-    const relationsData = relationsReader.getRows();
-
-    const relations = relationsData.map((row) => {
-      const created_at = row[3];
-      return {
-        from: row[0] as string,
-        to: row[1] as string,
-        relationType: row[2] as string,
-        createdAt: convertTimestampToISOWithFallback(created_at),
-      };
-    });
-
-    return { entities, relations };
-  }
 
   /**
    * Initialize Full-Text Search capabilities
@@ -988,10 +859,11 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       `);
       
       // Create FTS index for observations (content)
+      // Using 'id' as the unique identifier column
       await conn.run(`
         PRAGMA create_fts_index(
           'observations',
-          'entityName',
+          'id',
           'content',
           stemmer = 'english', 
           stopwords = 'english',
@@ -1139,6 +1011,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Search in observations table using BM25
       // Use CTE to avoid scalar subquery errors when match_bm25 is used in WHERE clause
       // Use MAX() to aggregate scores when an entity has multiple matching observations
+      this.logger.debug(`Searching observations for query: "${query}"`);
       const obsParams: any[] = [query];
       let obsJoinCondition = '';
       
@@ -1152,10 +1025,10 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         obsParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
       }
       
-      const obsReader = await conn.runAndReadAll(`
+      const obsQuery = `
         WITH scored_observations AS (
           SELECT o.entityName, 
-                 fts_main_observations.match_bm25(o.content, ?) AS score
+                 fts_main_observations.match_bm25(o.id, ?) AS score
           FROM observations o
           ${obsJoinCondition}
         )
@@ -1165,9 +1038,15 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         GROUP BY entityName
         ORDER BY score DESC
         LIMIT 250
-      `, obsParams);
+      `;
+      this.logger.debug(`Observations BM25 query: ${obsQuery}`);
+      this.logger.debug(`Observations query params: ${JSON.stringify(obsParams)}`);
+      
+      const obsReader = await conn.runAndReadAll(obsQuery, obsParams);
 
       const obsRows = obsReader.getRows();
+      this.logger.debug(`Observations BM25 search returned ${obsRows.length} results`);
+      
       for (const row of obsRows) {
         const entityName = row[0] as string;
         const obsScore = row[1] as number;
@@ -1261,7 +1140,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       await conn.run(`
         PRAGMA create_fts_index(
           'observations',
-          'entityName',
+          'id',
           'content',
           stemmer = 'english', 
           stopwords = 'english',
@@ -1482,7 +1361,24 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   private async searchWithLike(query: string, scope?: string): Promise<Entity[]> {
     try {
       const conn = await this.getConnection();
-      const likePattern = `%${query}%`;
+      
+      // Split query into search terms for more precise matching (similar to searchWithLikeFallback)
+      const searchTerms = query.split(/\s+/).filter(term => term.length > 0);
+      
+      if (searchTerms.length === 0) {
+        return [];
+      }
+      
+      // Build dynamic WHERE clause for multiple search terms (AND logic for compatibility)
+      const whereConditions = searchTerms.map(() => 
+        "(e.name ILIKE ? OR e.entityType ILIKE ? OR o.content ILIKE ?)"
+      ).join(" AND ");
+      
+      // Prepare parameters (each term used 3 times for name, entityType, content)
+      const params = searchTerms.flatMap(term => {
+        const likePattern = `%${term}%`;
+        return [likePattern, likePattern, likePattern];
+      });
       
       // Build scope filter if provided
       let scopeCondition = '';
@@ -1498,15 +1394,13 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug('No scope filter applied');
       }
       
-      const queryParams = [likePattern, likePattern, likePattern, ...scopeParams, `%${query}%`, `%${query}%`];
+      const queryParams = [...params, ...scopeParams, `%${searchTerms[0]}%`, `%${searchTerms[0]}%`];
       
       const sql = `
         SELECT DISTINCT e.name, e.entityType, e.created_at
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
-        WHERE (e.name ILIKE ?
-           OR e.entityType ILIKE ?
-           OR o.content ILIKE ?)
+        WHERE (${whereConditions})
         ${scopeCondition}
         ORDER BY 
           -- Prioritize exact name matches
@@ -1557,7 +1451,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using FTS approach with multiple keywords for large datasets
    */
-  private async searchWithMultiKeywordFTS(keywords: string[], scope?: string): Promise<Entity[]> {
+  private async searchWithMultiKeywordFTS(keywords: string[], options?: MultiKeywordSearchOptions): Promise<Entity[]> {
     try {
       const conn = await this.getConnection();
       
@@ -1565,14 +1459,17 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         return [];
       }
       
-      // Build dynamic WHERE clause for multiple search terms (AND logic)
+      const mode = options?.mode || 'OR';  // Default to OR mode
+      const scope = options?.scope;
+      
+      // Build dynamic WHERE clause for multiple search terms
       // SECURITY NOTE: This dynamic SQL construction is safe because:
       // 1. whereConditions contains only fixed template strings with ? placeholders
       // 2. All user input is passed through prepared statement parameters
       // 3. No direct string concatenation of user data occurs
       const whereConditions = keywords.map(() => 
         "(name ILIKE ? OR entityType ILIKE ? OR observations_text ILIKE ?)"
-      ).join(" AND ");
+      ).join(` ${mode} `);
       
       // Prepare parameters (each term used 3 times for name, entityType, observations)
       const params = keywords.flatMap(term => {
@@ -1595,7 +1492,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const reader = await conn.runAndReadAll(`
         SELECT DISTINCT name, entityType, created_at
         FROM entity_search_view
-        WHERE ${whereConditions}${scopeCondition}
+        WHERE (${whereConditions})${scopeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN name ILIKE ? THEN 1
@@ -1640,7 +1537,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using SQL LIKE queries with multiple keywords for smaller datasets
    */
-  private async searchWithMultiKeywordLike(keywords: string[], scope?: string): Promise<Entity[]> {
+  private async searchWithMultiKeywordLike(keywords: string[], options?: MultiKeywordSearchOptions): Promise<Entity[]> {
     try {
       const conn = await this.getConnection();
       
@@ -1648,14 +1545,17 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         return [];
       }
       
-      // Build dynamic WHERE clause for multiple search terms (AND logic)
+      const mode = options?.mode || 'OR';  // Default to OR mode
+      const scope = options?.scope;
+      
+      // Build dynamic WHERE clause for multiple search terms
       // SECURITY NOTE: This dynamic SQL construction is safe because:
       // 1. whereConditions contains only fixed template strings with ? placeholders
       // 2. All user input is passed through prepared statement parameters
       // 3. No direct string concatenation of user data occurs
       const whereConditions = keywords.map(() => 
         "(e.name ILIKE ? OR e.entityType ILIKE ? OR o.content ILIKE ?)"
-      ).join(" AND ");
+      ).join(` ${mode} `);
       
       // Prepare parameters (each term used 3 times for name, entityType, content)
       const params = keywords.flatMap(term => {
@@ -1679,7 +1579,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         SELECT DISTINCT e.name, e.entityType, e.created_at
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
-        WHERE ${whereConditions}${scopeCondition}
+        WHERE (${whereConditions})${scopeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN e.name ILIKE ? THEN 1
