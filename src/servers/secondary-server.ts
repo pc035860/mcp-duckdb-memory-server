@@ -6,6 +6,7 @@ import { ServerConfig } from "../config/server-config";
 import { Logger, ConsoleLogger } from "../logger";
 import { extractError } from "../utils";
 import { EntityObject, ObservationObject, RelationObject } from "../types";
+import { SearchNodesOptionsSchema, MultiKeywordSearchOptionsSchema } from "../utils/time-validation-schemas";
 
 /**
  * Secondary server that provides MCP interface and forwards requests to main server
@@ -181,19 +182,16 @@ export class SecondaryServer {
           .describe(
             "The search query to match against entity names, types, and observation content"
           ),
-        scope: z
-          .string()
+        options: SearchNodesOptionsSchema
           .optional()
-          .describe(
-            "Optional scope to filter entities, e.g., 'project' or '[project]'"
-          ),
+          .describe("Search options including scope and time range filtering"),
       },
-      async ({ query, scope }) => ({
+      async ({ query, options }) => ({
         content: [
           {
             type: "text",
             text: JSON.stringify(
-              await this.manager.searchNodes(query, scope ? { scope } : undefined),
+              await this.manager.searchNodes(query, options),
               null,
               2
             ),
@@ -210,21 +208,9 @@ export class SecondaryServer {
         keywords: z
           .array(z.string())
           .describe("An array of keywords to search for"),
-        options: z
-          .object({
-            mode: z
-              .enum(["OR", "AND"])
-              .optional()
-              .describe("How to combine keywords (default: OR)"),
-            scope: z
-              .string()
-              .optional()
-              .describe(
-                "Optional scope to filter entities, e.g., 'project' or '[project]'"
-              ),
-          })
+        options: MultiKeywordSearchOptionsSchema
           .optional()
-          .describe("Search options"),
+          .describe("Search options including mode, scope and time range filtering"),
       },
       async ({ keywords, options }) => ({
         content: [

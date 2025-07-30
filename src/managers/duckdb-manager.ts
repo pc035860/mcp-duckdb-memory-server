@@ -5,6 +5,7 @@ import {
   KnowledgeGraph,
   MultiKeywordSearchOptions,
   SearchNodesOptions,
+  TimeRangeOptions,
   DatabaseRow,
 } from "../types";
 import { KnowledgeGraphManagerInterface } from "./interface";
@@ -694,11 +695,11 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       if (entityCount < this.entityCountThreshold) {
         // Small dataset: use SQL LIKE search
         this.logger.debug("Using LIKE search for small dataset");
-        entities = await this.searchWithLike(query, scope);
+        entities = await this.searchWithLike(query, scope, options?.timeRange);
       } else {
         // Large dataset: use FTS search
         this.logger.debug("Using FTS search for large dataset");
-        entities = await this.searchWithFTS(query, scope);
+        entities = await this.searchWithFTS(query, scope, options?.timeRange);
       }
       
 
@@ -924,7 +925,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using DuckDB Full-Text Search capabilities
    */
-  private async searchWithFTS(query: string, scope?: string): Promise<Entity[]> {
+  private async searchWithFTS(query: string, scope?: string, timeRange?: TimeRangeOptions): Promise<Entity[]> {
     try {
       // Sanitize query input
       const cleanQuery = query.trim();
@@ -936,9 +937,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       // Use different search strategies based on FTS availability
       if (this.ftsEnabled) {
-        return await this.searchWithBM25(cleanQuery, conn, scope);
+        return await this.searchWithBM25(cleanQuery, conn, scope, timeRange);
       } else {
-        return await this.searchWithLikeFallback(cleanQuery, conn, scope);
+        return await this.searchWithLikeFallback(cleanQuery, conn, scope, timeRange);
       }
       
     } catch (error) {
@@ -951,7 +952,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Search using DuckDB FTS BM25 algorithm (when FTS is enabled)
    */
-  private async searchWithBM25(query: string, conn: DuckDBConnection, scope?: string): Promise<Entity[]> {
+  private async searchWithBM25(query: string, conn: DuckDBConnection, scope?: string, timeRange?: TimeRangeOptions): Promise<Entity[]> {
     try {
       const entities: Entity[] = [];
       const entityScores = new Map<string, number>();
@@ -967,14 +968,26 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         entityParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
       }
       
+      // Build time range filter if provided
+      let timeCondition = '';
+      if (timeRange) {
+        // For entities query in BM25, we want to filter by entity creation time only
+        const entityOnlyTimeRange = { ...timeRange, timeScope: 'entities' as const };
+        const timeFilter = this.buildTimeCondition(entityOnlyTimeRange);
+        if (timeFilter.condition) {
+          timeCondition = `AND (${timeFilter.condition})`;
+          entityParams.push(...timeFilter.params);
+        }
+      }
+      
       // Search in entities table using BM25
       // Use CTE to avoid scalar subquery errors when match_bm25 is used in WHERE clause
       const entityReader = await conn.runAndReadAll(`
         WITH scored_entities AS (
           SELECT name, entityType, created_at, 
                  fts_main_entities.match_bm25(name, ?) AS score
-          FROM entities
-          WHERE 1=1 ${scopeCondition}
+          FROM entities e
+          WHERE 1=1 ${scopeCondition} ${timeCondition}
         )
         SELECT name, entityType, created_at, score
         FROM scored_entities
@@ -1015,14 +1028,32 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const obsParams: any[] = [query];
       let obsJoinCondition = '';
       
-      if (scope) {
-        // Join with entities table to apply scope filter
-        const cleanScope = scope.replace(/[\[\]]/g, '');
-        obsJoinCondition = `
-          JOIN entities e ON o.entityName = e.name
-          WHERE (e.name ILIKE ? OR e.name ILIKE ?)
-        `;
-        obsParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+      if (scope || timeRange) {
+        const conditions: string[] = [];
+        
+        if (scope) {
+          // Join with entities table to apply scope filter
+          const cleanScope = scope.replace(/[\[\]]/g, '');
+          conditions.push('(e.name ILIKE ? OR e.name ILIKE ?)');
+          obsParams.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
+        }
+        
+        if (timeRange) {
+          // For observations query in BM25, we want to filter by observation creation time only
+          const obsOnlyTimeRange = { ...timeRange, timeScope: 'observations' as const };
+          const timeFilter = this.buildTimeCondition(obsOnlyTimeRange);
+          if (timeFilter.condition) {
+            conditions.push(timeFilter.condition);
+            obsParams.push(...timeFilter.params);
+          }
+        }
+        
+        if (conditions.length > 0) {
+          obsJoinCondition = `
+            JOIN entities e ON o.entityName = e.name
+            WHERE ${conditions.join(' AND ')}
+          `;
+        }
       }
       
       const obsQuery = `
@@ -1096,7 +1127,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
     } catch (error) {
       this.logger.warn("BM25 search failed, falling back to LIKE search", extractError(error));
-      return await this.searchWithLikeFallback(query, conn);
+      return await this.searchWithLikeFallback(query, conn, scope, timeRange);
     }
   }
 
@@ -1287,7 +1318,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Fallback search using ILIKE when FTS is not available
    */
-  private async searchWithLikeFallback(query: string, conn: DuckDBConnection, scope?: string): Promise<Entity[]> {
+  private async searchWithLikeFallback(query: string, conn: DuckDBConnection, scope?: string, timeRange?: TimeRangeOptions): Promise<Entity[]> {
     // Split query into search terms for more precise matching
     const searchTerms = query.split(/\s+/).filter(term => term.length > 0);
     
@@ -1314,10 +1345,39 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       params.push(`${cleanScope}:%`, `[${cleanScope}]:%`);
     }
     
+    // Add time range filter if provided
+    let timeCondition = '';
+    if (timeRange) {
+      const timeFilter = this.buildTimeCondition(timeRange);
+      if (timeFilter.condition) {
+        // For entity_search_view, we only care about entity timestamps
+        const entityTimeConditions = timeFilter.condition
+          .split(' AND ')
+          .filter(cond => cond.includes('e.created_at'))
+          .map(cond => cond.replace('e.created_at', 'created_at')) // Replace e.created_at with created_at for the view
+          .join(' AND ');
+        
+        if (entityTimeConditions) {
+          timeCondition = ` AND (${entityTimeConditions})`;
+          // Add corresponding parameters for entity time conditions (only for absolute time filters)
+          const conditionParts = timeFilter.condition.split(' AND ');
+          const entityTimeParams: any[] = [];
+          
+          conditionParts.forEach((cond, index) => {
+            if (cond.includes('e.created_at') && index < timeFilter.params.length) {
+              entityTimeParams.push(timeFilter.params[index]);
+            }
+          });
+          
+          params.push(...entityTimeParams);
+        }
+      }
+    }
+    
     const reader = await conn.runAndReadAll(`
       SELECT DISTINCT name, entityType, created_at
       FROM entity_search_view
-      WHERE ${whereConditions}${scopeCondition}
+      WHERE ${whereConditions}${scopeCondition}${timeCondition}
       ORDER BY 
         -- Prioritize exact name matches
         CASE WHEN name ILIKE ? THEN 1
@@ -1356,9 +1416,198 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   }
 
   /**
+   * Build time condition SQL clause and parameters for filtering
+   * @param timeRange - Time range options
+   * @returns Object containing SQL condition string and parameters array
+   */
+  private buildTimeCondition(timeRange: TimeRangeOptions): { condition: string; params: any[] } {
+    const conditions: string[] = [];
+    const params: any[] = [];
+    
+    const timeScope = timeRange.timeScope || 'any';
+    
+    // Handle absolute time ranges
+    if (timeRange.createdAfter) {
+      try {
+        // Convert ISO 8601 to DuckDB TIMESTAMP format
+        const afterTimestamp = new Date(timeRange.createdAfter).toISOString();
+        const scopeConditions: string[] = [];
+        
+        if (timeScope === 'entities') {
+          scopeConditions.push('e.created_at >= ?::TIMESTAMP');
+          params.push(afterTimestamp);
+        } else if (timeScope === 'observations') {
+          scopeConditions.push('o.created_at >= ?::TIMESTAMP');
+          params.push(afterTimestamp);
+        } else if (timeScope === 'relations') {
+          scopeConditions.push('r.created_at >= ?::TIMESTAMP');
+          params.push(afterTimestamp);
+        } else { // 'any' - use OR logic for entities and observations
+          scopeConditions.push('e.created_at >= ?::TIMESTAMP');
+          params.push(afterTimestamp);
+          scopeConditions.push('o.created_at >= ?::TIMESTAMP');
+          params.push(afterTimestamp);
+        }
+        
+        if (scopeConditions.length > 0) {
+          if (timeScope === 'any' && scopeConditions.length > 1) {
+            conditions.push(`(${scopeConditions.join(' OR ')})`);
+          } else {
+            conditions.push(...scopeConditions);
+          }
+        }
+        
+        this.logger.debug(`Applied createdAfter filter: ${afterTimestamp} for scope: ${timeScope}`);
+      } catch (error) {
+        this.logger.warn(`Invalid createdAfter date format: ${timeRange.createdAfter}`, extractError(error));
+      }
+    }
+    
+    if (timeRange.createdBefore) {
+      try {
+        // Convert ISO 8601 to DuckDB TIMESTAMP format
+        const beforeTimestamp = new Date(timeRange.createdBefore).toISOString();
+        const scopeConditions: string[] = [];
+        
+        if (timeScope === 'entities') {
+          scopeConditions.push('e.created_at <= ?::TIMESTAMP');
+          params.push(beforeTimestamp);
+        } else if (timeScope === 'observations') {
+          scopeConditions.push('o.created_at <= ?::TIMESTAMP');
+          params.push(beforeTimestamp);
+        } else if (timeScope === 'relations') {
+          scopeConditions.push('r.created_at <= ?::TIMESTAMP');
+          params.push(beforeTimestamp);
+        } else { // 'any' - use OR logic for entities and observations
+          scopeConditions.push('e.created_at <= ?::TIMESTAMP');
+          params.push(beforeTimestamp);
+          scopeConditions.push('o.created_at <= ?::TIMESTAMP');
+          params.push(beforeTimestamp);
+        }
+        
+        if (scopeConditions.length > 0) {
+          if (timeScope === 'any' && scopeConditions.length > 1) {
+            conditions.push(`(${scopeConditions.join(' OR ')})`);
+          } else {
+            conditions.push(...scopeConditions);
+          }
+        }
+        
+        this.logger.debug(`Applied createdBefore filter: ${beforeTimestamp} for scope: ${timeScope}`);
+      } catch (error) {
+        this.logger.warn(`Invalid createdBefore date format: ${timeRange.createdBefore}`, extractError(error));
+      }
+    }
+    
+    // Handle relative time ranges
+    if (timeRange.lastDays && timeRange.lastDays > 0) {
+      const scopeConditions: string[] = [];
+      
+      const cutoffTime = new Date(Date.now() - timeRange.lastDays * 24 * 60 * 60 * 1000).toISOString();
+      
+      if (timeScope === 'entities') {
+        scopeConditions.push(`e.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else if (timeScope === 'observations') {
+        scopeConditions.push(`o.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else if (timeScope === 'relations') {
+        scopeConditions.push(`r.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else { // 'any' - use OR logic for entities and observations
+        scopeConditions.push(`e.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+        scopeConditions.push(`o.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      }
+      
+      if (scopeConditions.length > 0) {
+        if (timeScope === 'any' && scopeConditions.length > 1) {
+          conditions.push(`(${scopeConditions.join(' OR ')})`);
+        } else {
+          conditions.push(...scopeConditions);
+        }
+      }
+      
+      this.logger.debug(`Applied lastDays filter: ${timeRange.lastDays} days for scope: ${timeScope}`);
+    }
+    
+    if (timeRange.lastHours && timeRange.lastHours > 0) {
+      const scopeConditions: string[] = [];
+      
+      const cutoffTime = new Date(Date.now() - timeRange.lastHours * 60 * 60 * 1000).toISOString();
+      
+      if (timeScope === 'entities') {
+        scopeConditions.push(`e.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else if (timeScope === 'observations') {
+        scopeConditions.push(`o.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else if (timeScope === 'relations') {
+        scopeConditions.push(`r.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else { // 'any' - use OR logic for entities and observations
+        scopeConditions.push(`e.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+        scopeConditions.push(`o.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      }
+      
+      if (scopeConditions.length > 0) {
+        if (timeScope === 'any' && scopeConditions.length > 1) {
+          conditions.push(`(${scopeConditions.join(' OR ')})`);
+        } else {
+          conditions.push(...scopeConditions);
+        }
+      }
+      
+      this.logger.debug(`Applied lastHours filter: ${timeRange.lastHours} hours for scope: ${timeScope}`);
+    }
+    
+    if (timeRange.lastMinutes && timeRange.lastMinutes > 0) {
+      const scopeConditions: string[] = [];
+      
+      const cutoffTime = new Date(Date.now() - timeRange.lastMinutes * 60 * 1000).toISOString();
+      
+      if (timeScope === 'entities') {
+        scopeConditions.push(`e.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else if (timeScope === 'observations') {
+        scopeConditions.push(`o.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else if (timeScope === 'relations') {
+        scopeConditions.push(`r.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      } else { // 'any' - use OR logic for entities and observations
+        scopeConditions.push(`e.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+        scopeConditions.push(`o.created_at >= ?::TIMESTAMP`);
+        params.push(cutoffTime);
+      }
+      
+      if (scopeConditions.length > 0) {
+        if (timeScope === 'any' && scopeConditions.length > 1) {
+          conditions.push(`(${scopeConditions.join(' OR ')})`);
+        } else {
+          conditions.push(...scopeConditions);
+        }
+      }
+      
+      this.logger.debug(`Applied lastMinutes filter: ${timeRange.lastMinutes} minutes for scope: ${timeScope}`);
+    }
+    
+    // Combine conditions with AND logic
+    const condition = conditions.length > 0 ? conditions.join(' AND ') : '';
+    
+    this.logger.debug(`Built time condition: ${condition} with ${params.length} parameters`);
+    
+    return { condition, params };
+  }
+
+  /**
    * Search using SQL LIKE queries for smaller datasets
    */
-  private async searchWithLike(query: string, scope?: string): Promise<Entity[]> {
+  private async searchWithLike(query: string, scope?: string, timeRange?: TimeRangeOptions): Promise<Entity[]> {
     try {
       const conn = await this.getConnection();
       
@@ -1394,7 +1643,20 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug('No scope filter applied');
       }
       
-      const queryParams = [...params, ...scopeParams, `%${searchTerms[0]}%`, `%${searchTerms[0]}%`];
+      // Build time range filter if provided
+      let timeCondition = '';
+      const timeParams: any[] = [];
+      
+      if (timeRange) {
+        const timeFilter = this.buildTimeCondition(timeRange);
+        if (timeFilter.condition) {
+          timeCondition = `AND (${timeFilter.condition})`;
+          timeParams.push(...timeFilter.params);
+          this.logger.debug(`Time filter applied: ${timeCondition}`);
+        }
+      }
+      
+      const queryParams = [...params, ...scopeParams, ...timeParams, `%${searchTerms[0]}%`, `%${searchTerms[0]}%`];
       
       const sql = `
         SELECT DISTINCT e.name, e.entityType, e.created_at
@@ -1402,6 +1664,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         LEFT JOIN observations o ON e.name = o.entityName
         WHERE (${whereConditions})
         ${scopeCondition}
+        ${timeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN e.name ILIKE ? THEN 1
@@ -1461,6 +1724,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       const mode = options?.mode || 'OR';  // Default to OR mode
       const scope = options?.scope;
+      const timeRange = options?.timeRange;
       
       // Build dynamic WHERE clause for multiple search terms
       // SECURITY NOTE: This dynamic SQL construction is safe because:
@@ -1489,10 +1753,27 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
       }
       
+      // Add time range filter if provided
+      let timeCondition = '';
+      const timeParams: any[] = [];
+      
+      if (timeRange) {
+        const timeFilter = this.buildTimeCondition(timeRange);
+        if (timeFilter.condition) {
+          // For entity_search_view, use created_at directly (no table prefix needed)
+          const viewTimeCondition = timeFilter.condition
+            .replace(/e\.created_at/g, 'created_at')
+            .replace(/o\.created_at/g, 'created_at');
+          timeCondition = ` AND (${viewTimeCondition})`;
+          timeParams.push(...timeFilter.params);
+          this.logger.debug(`Time filter applied: ${viewTimeCondition} with params: [${timeFilter.params.join(', ')}]`);
+        }
+      }
+      
       const reader = await conn.runAndReadAll(`
         SELECT DISTINCT name, entityType, created_at
         FROM entity_search_view
-        WHERE (${whereConditions})${scopeCondition}
+        WHERE (${whereConditions})${scopeCondition}${timeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN name ILIKE ? THEN 1
@@ -1500,7 +1781,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
                ELSE 3 END,
           created_at DESC
         LIMIT 500
-      `, [...params, ...scopeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
+      `, [...params, ...scopeParams, ...timeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
       
       const rows = reader.getRows();
       const entities: Entity[] = [];
@@ -1547,6 +1828,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       const mode = options?.mode || 'OR';  // Default to OR mode
       const scope = options?.scope;
+      const timeRange = options?.timeRange;
       
       // Build dynamic WHERE clause for multiple search terms
       // SECURITY NOTE: This dynamic SQL construction is safe because:
@@ -1575,11 +1857,24 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug(`Scope filter applied: ${scope} -> ${scopeCondition} with params: [${scopeParams.join(', ')}]`);
       }
       
+      // Add time range filter if provided
+      let timeCondition = '';
+      const timeParams: any[] = [];
+      
+      if (timeRange) {
+        const timeFilter = this.buildTimeCondition(timeRange);
+        if (timeFilter.condition) {
+          timeCondition = ` AND (${timeFilter.condition})`;
+          timeParams.push(...timeFilter.params);
+          this.logger.debug(`Time filter applied: ${timeFilter.condition} with params: [${timeFilter.params.join(', ')}]`);
+        }
+      }
+      
       const reader = await conn.runAndReadAll(`
         SELECT DISTINCT e.name, e.entityType, e.created_at
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
-        WHERE (${whereConditions})${scopeCondition}
+        WHERE (${whereConditions})${scopeCondition}${timeCondition}
         ORDER BY 
           -- Prioritize exact name matches
           CASE WHEN e.name ILIKE ? THEN 1
@@ -1587,7 +1882,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
                ELSE 3 END,
           e.created_at DESC
         LIMIT 500
-      `, [...params, ...scopeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
+      `, [...params, ...scopeParams, ...timeParams, `%${keywords[0]}%`, `%${keywords[0]}%`]);
       
       const rows = reader.getRows();
       const entities: Entity[] = [];

@@ -21,6 +21,8 @@ import {
   isRebuildFTSIndexesRequest,
   isCheckFTSIndexHealthRequest,
   isGetFTSInfoRequest,
+  validateSearchNodesRequest,
+  validateSearchMultiKeywordsRequest,
 } from "./ipc/protocol";
 
 /**
@@ -180,10 +182,14 @@ export class MainServer {
       }
 
       if (isSearchNodesRequest(request)) {
+        // Validate request payload including time range options
+        validateSearchNodesRequest(request.payload);
         return await this.manager.searchNodes(request.payload.query, request.payload.options);
       }
 
       if (isSearchMultiKeywordsRequest(request)) {
+        // Validate request payload including time range options  
+        validateSearchMultiKeywordsRequest(request.payload);
         return await this.manager.searchMultiKeywords(
           request.payload.keywords,
           request.payload.options
