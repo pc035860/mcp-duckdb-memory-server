@@ -5,7 +5,9 @@ import {
   KnowledgeGraph,
   MultiKeywordSearchOptions,
   SearchNodesOptions,
+  TimeRangeOptions,
 } from "../../types";
+import { validateTimeRangeOptions } from "../../utils/time-validation";
 
 /**
  * IPC Request types for all knowledge graph operations
@@ -240,4 +242,49 @@ export function isGetFTSInfoRequest(req: IPCRequest): req is GetFTSInfoRequest {
  */
 export function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+/**
+ * Validates time range options in IPC requests
+ * Throws an error if validation fails
+ */
+export function validateRequestTimeRange(timeRange?: TimeRangeOptions): void {
+  if (!timeRange) {
+    return;
+  }
+
+  const validation = validateTimeRangeOptions(timeRange);
+  if (!validation.valid) {
+    throw new Error(`Invalid time range options: ${validation.errors.join('; ')}`);
+  }
+}
+
+/**
+ * Validates search nodes request payload
+ */
+export function validateSearchNodesRequest(payload: SearchNodesRequest['payload']): void {
+  if (!payload.query || typeof payload.query !== 'string') {
+    throw new Error('Search query is required and must be a string');
+  }
+
+  if (payload.options?.timeRange) {
+    validateRequestTimeRange(payload.options.timeRange);
+  }
+}
+
+/**
+ * Validates search multi keywords request payload  
+ */
+export function validateSearchMultiKeywordsRequest(payload: SearchMultiKeywordsRequest['payload']): void {
+  if (!Array.isArray(payload.keywords) || payload.keywords.length === 0) {
+    throw new Error('Keywords array is required and cannot be empty');
+  }
+
+  if (payload.keywords.some(keyword => typeof keyword !== 'string')) {
+    throw new Error('All keywords must be strings');
+  }
+
+  if (payload.options?.timeRange) {
+    validateRequestTimeRange(payload.options.timeRange);
+  }
 }

@@ -61,11 +61,29 @@ export type KnowledgeGraph = {
 };
 
 /**
+ * Time range options for search operations
+ */
+export type TimeRangeOptions = {
+  // Absolute time range
+  createdAfter?: string;   // ISO 8601 format: '2024-01-01T00:00:00Z'
+  createdBefore?: string;  // ISO 8601 format: '2024-12-31T23:59:59Z'
+  
+  // Relative time range
+  lastDays?: number;       // Last N days
+  lastHours?: number;      // Last N hours
+  lastMinutes?: number;    // Last N minutes
+  
+  // Time range application target
+  timeScope?: 'entities' | 'observations' | 'relations' | 'any';
+};
+
+/**
  * Options for multi-keyword search
  */
 export type MultiKeywordSearchOptions = {
   mode?: 'OR' | 'AND';  // How to combine keywords, defaults to 'OR'
   scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
+  timeRange?: TimeRangeOptions;  // Optional time range filtering
 };
 
 /**
@@ -73,6 +91,7 @@ export type MultiKeywordSearchOptions = {
  */
 export type SearchNodesOptions = {
   scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
+  timeRange?: TimeRangeOptions;  // Optional time range filtering
 };
 
 /**
