@@ -356,11 +356,12 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
               
               // Check if observations table still exists
               const tableCheck = await this.connection.runAndReadAll(`
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='observations'
+                SELECT COUNT(*) as count 
+                FROM information_schema.tables 
+                WHERE table_schema = 'main' AND table_name = 'observations'
               `);
               
-              if (tableCheck.getRows().length === 0) {
+              if (tableCheck.getRows()[0].count === 0) {
                 // Observations table was dropped, restore from backup
                 await this.connection.run(`
                   ALTER TABLE observations_backup RENAME TO observations
@@ -1445,11 +1446,12 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Verify that the tables exist and are not temporary migration tables
       try {
         const tableCheck = await conn.runAndReadAll(`
-          SELECT name FROM sqlite_master 
-          WHERE type='table' 
-          AND name IN ('entities', 'observations')
-          AND name NOT LIKE '%_new'
-          AND name NOT LIKE '%_backup'
+          SELECT table_name 
+          FROM information_schema.tables 
+          WHERE table_schema = 'main'
+          AND table_name IN ('entities', 'observations')
+          AND table_name NOT LIKE '%_new'
+          AND table_name NOT LIKE '%_backup'
         `);
         
         const tables = tableCheck.getRows().map(row => row[0] as string);

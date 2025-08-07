@@ -196,10 +196,17 @@ class DatabaseRepairTool {
 
   private async cleanupFTSIndexes(conn: DuckDBConnection): Promise<void> {
     try {
-      // Try to drop all FTS indexes
-      const tables = ['entities', 'observations', 'observations_new'];
+      // Only try to drop FTS indexes for tables that actually exist
+      const tablesResult = await conn.runAndReadAll(`
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'main' 
+        AND table_name IN ('entities', 'observations')
+      `);
       
-      for (const table of tables) {
+      const existingTables = tablesResult.getRows().map(row => row[0] as string);
+      
+      for (const table of existingTables) {
         try {
           await conn.run(`PRAGMA drop_fts_index('${table}')`);
           this.log(`Drop FTS index ${table}`, "SUCCESS", "Index dropped");
