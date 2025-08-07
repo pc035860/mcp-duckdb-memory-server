@@ -12,17 +12,19 @@
   "main": "index.js",
   "scripts": {
     "dev": "pnpm build && npx @modelcontextprotocol/inspector pnpm start",
-    "build": "tsup && shx chmod +x dist/index.mjs && shx chmod +x dist/tools/merge-duckdb.mjs",
+    "build": "tsup && shx chmod +x dist/index.mjs && shx chmod +x dist/tools/merge-duckdb.mjs && shx chmod +x dist/tools/repair-database.mjs",
     "start": "node dist/index.mjs",
     "prepare": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "changeset:publish": "pnpm build && changeset publish",
-    "merge": "node dist/tools/merge-duckdb.mjs"
+    "merge": "node dist/tools/merge-duckdb.mjs",
+    "repair": "node dist/tools/repair-database.mjs"
   },
   "bin": {
     "mcp-duckdb-memory-server": "dist/index.mjs",
-    "merge-duckdb": "dist/tools/merge-duckdb.mjs"
+    "merge-duckdb": "dist/tools/merge-duckdb.mjs",
+    "repair-database": "dist/tools/repair-database.mjs"
   },
   "files": [
     "dist"

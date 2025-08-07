@@ -5,3 +5,5 @@ docker-compose.yml
 
 .serena/
 .mcp.json
+
+tests/validation/report-*

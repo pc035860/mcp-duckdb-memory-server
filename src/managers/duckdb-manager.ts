@@ -14,6 +14,7 @@ import { DuckDBInstance, DuckDBConnection } from "@duckdb/node-api";
 import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
 import { extractError, convertTimestampToISOWithFallback } from "../utils";
+import { ConcurrencyController, OperationType } from "../utils/concurrency-controller";
 
 /**
  * DuckDB implementation with persistent connection (no cleanup per operation)
@@ -34,6 +35,13 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   private entityCountCache: { count: number; timestamp: number } | null = null;
   private readonly CACHE_TTL = 60000; // 1分鐘快取
   
+  // Migration state tracking (kept for backward compatibility)
+  private migrationInProgress: boolean = false;
+  private migrationLock: Promise<void> | null = null;
+  
+  // Centralized concurrency controller
+  private concurrencyController: ConcurrencyController;
+  
   // FTS index rebuild debounce time in milliseconds
   private static readonly FTS_REBUILD_DEBOUNCE_MS = 5000;
 
@@ -43,12 +51,25 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     this.logger = logger || new ConsoleLogger();
     this.allowExternalTimestamps = allowExternalTimestamps;
     this.entityCountThreshold = entityCountThreshold;
+    
+    // Initialize concurrency controller
+    this.concurrencyController = new ConcurrencyController(this.logger);
 
     // Create directory if it doesn't exist
     const dbPathDir = dirname(dbPath);
     if (!existsSync(dbPathDir)) {
       mkdirSync(dbPathDir, { recursive: true });
     }
+  }
+  
+  /**
+   * Execute operation with concurrency control
+   */
+  private async executeWithConcurrencyControl<T>(
+    operationType: OperationType,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    return this.concurrencyController.execute(operationType, operation);
   }
 
   /**
@@ -152,43 +173,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       }
       
       // Handle migration for observations table - add id column if it doesn't exist
-      try {
-        // Check if id column exists
-        const result = await this.connection.runAndReadAll(`
-          SELECT column_name FROM information_schema.columns 
-          WHERE table_name = 'observations' AND column_name = 'id'
-        `);
-        
-        if (result.getRows().length === 0) {
-          this.logger.info("Migrating observations table to add id column");
-          
-          // Create new table with id column
-          await this.connection.run(`
-            CREATE SEQUENCE IF NOT EXISTS observations_id_seq;
-            CREATE TABLE observations_new (
-              id INTEGER PRIMARY KEY DEFAULT nextval('observations_id_seq'),
-              entityName VARCHAR,
-              content VARCHAR,
-              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-              FOREIGN KEY (entityName) REFERENCES entities(name)
-            )
-          `);
-          
-          // Copy data from old table
-          await this.connection.run(`
-            INSERT INTO observations_new (entityName, content, created_at)
-            SELECT entityName, content, created_at FROM observations
-          `);
-          
-          // Drop old table and rename new table
-          await this.connection.run(`DROP TABLE observations`);
-          await this.connection.run(`ALTER TABLE observations_new RENAME TO observations`);
-          
-          this.logger.info("Observations table migration completed");
-        }
-      } catch (migrationError) {
-        this.logger.debug("Observations table already has id column or migration not needed", extractError(migrationError));
-      }
+      await this.migrateObservationsTable();
 
       // Legacy data migration timestamp - intentionally hardcoded for consistency
       // This ensures all migrated records have the same timestamp for data integrity
@@ -209,6 +194,205 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     } catch (error) {
       this.logger.error("Failed to initialize database", extractError(error));
       throw error;
+    }
+  }
+
+  /**
+   * Migrate observations table to add id column with proper transaction handling
+   */
+  private async migrateObservationsTable(): Promise<void> {
+    // Prevent concurrent migrations
+    if (this.migrationInProgress || (this.concurrencyController && this.concurrencyController.isOperationInProgress('migration'))) {
+      this.logger.warn("Migration already in progress, waiting for completion");
+      if (this.migrationLock) {
+        await this.migrationLock;
+      }
+      return;
+    }
+
+    // Create migration promise for other concurrent calls to wait on
+    this.migrationLock = this.performObservationsMigration();
+    
+    try {
+      await this.migrationLock;
+    } finally {
+      this.migrationLock = null;
+    }
+  }
+
+  /**
+   * Perform the actual observations table migration
+   */
+  private async performObservationsMigration(): Promise<void> {
+    this.migrationInProgress = true;
+    let transactionStarted = false;
+    let backupTableCreated = false;
+    
+    try {
+      // Check if id column exists
+      const result = await this.connection.runAndReadAll(`
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = 'observations' AND column_name = 'id'
+      `);
+      
+      if (result.getRows().length === 0) {
+        this.logger.info("Starting observations table migration to add id column");
+        
+        // Start transaction for atomic migration
+        await this.connection.run(`BEGIN TRANSACTION`);
+        transactionStarted = true;
+        this.logger.debug("Migration transaction started");
+        
+        // Create backup table first (for recovery if needed)
+        await this.connection.run(`
+          CREATE TABLE observations_backup AS 
+          SELECT * FROM observations
+        `);
+        backupTableCreated = true;
+        this.logger.debug("Backup table created");
+        
+        // Get row count for verification
+        const countResult = await this.connection.runAndReadAll(`
+          SELECT COUNT(*) as count FROM observations
+        `);
+        const originalCount = countResult.getRows()[0].count;
+        this.logger.debug(`Original observations count: ${originalCount}`);
+        
+        // Create sequence if it doesn't exist
+        await this.connection.run(`
+          CREATE SEQUENCE IF NOT EXISTS observations_id_seq
+        `);
+        
+        // Create new table with id column
+        await this.connection.run(`
+          CREATE TABLE observations_new (
+            id INTEGER PRIMARY KEY DEFAULT nextval('observations_id_seq'),
+            entityName VARCHAR,
+            content VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (entityName) REFERENCES entities(name)
+          )
+        `);
+        this.logger.debug("New observations table created with id column");
+        
+        // Copy data from old table with explicit column mapping
+        await this.connection.run(`
+          INSERT INTO observations_new (entityName, content, created_at)
+          SELECT entityName, content, 
+                 COALESCE(created_at, CURRENT_TIMESTAMP) as created_at 
+          FROM observations
+        `);
+        this.logger.debug("Data copied to new table");
+        
+        // Verify row count matches
+        const newCountResult = await this.connection.runAndReadAll(`
+          SELECT COUNT(*) as count FROM observations_new
+        `);
+        const newCount = newCountResult.getRows()[0].count;
+        
+        if (originalCount !== newCount) {
+          throw new Error(`Row count mismatch during migration: original=${originalCount}, new=${newCount}`);
+        }
+        this.logger.debug(`Row count verified: ${newCount} rows migrated successfully`);
+        
+        // Drop old table
+        await this.connection.run(`DROP TABLE observations`);
+        this.logger.debug("Old observations table dropped");
+        
+        // Rename new table to observations
+        await this.connection.run(`ALTER TABLE observations_new RENAME TO observations`);
+        this.logger.debug("New table renamed to observations");
+        
+        // Create indexes for better performance
+        await this.connection.run(`
+          CREATE INDEX IF NOT EXISTS idx_observations_entityName 
+          ON observations(entityName)
+        `);
+        await this.connection.run(`
+          CREATE INDEX IF NOT EXISTS idx_observations_created_at 
+          ON observations(created_at)
+        `);
+        this.logger.debug("Indexes created on observations table");
+        
+        // Drop backup table after successful migration
+        await this.connection.run(`DROP TABLE IF EXISTS observations_backup`);
+        this.logger.debug("Backup table dropped after successful migration");
+        
+        // Commit transaction
+        await this.connection.run(`COMMIT`);
+        transactionStarted = false;
+        
+        this.logger.info(`Observations table migration completed successfully. Migrated ${newCount} rows.`);
+        
+        // Mark FTS indexes as needing rebuild if FTS is enabled
+        // Note: Migration is already marked as complete at this point (in finally block)
+        // So we need to set a flag or schedule rebuild with a delay
+        if (this.ftsEnabled) {
+          this.logger.info("Scheduling FTS index rebuild after migration with extra delay");
+          // Use a longer delay after migration to ensure all operations are complete
+          setTimeout(async () => {
+            if (!this.migrationInProgress && this.ftsEnabled) {
+              await this.scheduleIndexRebuild();
+            }
+          }, 2000); // 2 second delay after migration
+        }
+      } else {
+        this.logger.debug("Observations table already has id column, skipping migration");
+      }
+    } catch (error) {
+      this.logger.error("Error during observations table migration", extractError(error));
+      
+      // Rollback transaction if it was started
+      if (transactionStarted) {
+        try {
+          this.logger.info("Rolling back migration transaction");
+          await this.connection.run(`ROLLBACK`);
+          this.logger.info("Migration transaction rolled back successfully");
+          
+          // Attempt to restore from backup if it exists
+          if (backupTableCreated) {
+            try {
+              this.logger.info("Attempting to restore from backup table");
+              
+              // Check if observations table still exists
+              const tableCheck = await this.connection.runAndReadAll(`
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name='observations'
+              `);
+              
+              if (tableCheck.getRows().length === 0) {
+                // Observations table was dropped, restore from backup
+                await this.connection.run(`
+                  ALTER TABLE observations_backup RENAME TO observations
+                `);
+                this.logger.info("Successfully restored observations table from backup");
+              } else {
+                // Clean up backup table if observations still exists
+                await this.connection.run(`DROP TABLE IF EXISTS observations_backup`);
+                this.logger.debug("Cleaned up backup table");
+              }
+              
+              // Clean up any partial tables
+              await this.connection.run(`DROP TABLE IF EXISTS observations_new`);
+              this.logger.debug("Cleaned up partial migration tables");
+            } catch (restoreError) {
+              this.logger.error("Failed to restore from backup", extractError(restoreError));
+              // At this point, manual intervention may be required
+              throw new Error("Migration failed and automatic recovery failed. Manual intervention required.");
+            }
+          }
+        } catch (rollbackError) {
+          this.logger.error("Failed to rollback migration transaction", extractError(rollbackError));
+          // If rollback fails, the database might be in an inconsistent state
+          throw new Error("Critical: Migration failed and rollback failed. Database may be in inconsistent state.");
+        }
+      }
+      
+      // Log the original error but don't throw it for non-critical migrations
+      // This allows the application to continue even if migration fails
+      this.logger.warn("Observations migration skipped due to error. Application will continue with existing schema.");
+    } finally {
+      this.migrationInProgress = false;
     }
   }
 
@@ -319,10 +503,12 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
    * Create entities
    */
   async createEntities(entities: Entity[]): Promise<Entity[]> {
-    const createdEntities: Entity[] = [];
-    const conn = await this.getConnection();
+    // Execute bulk write with concurrency control
+    return this.executeWithConcurrencyControl('bulkWrite', async () => {
+      const createdEntities: Entity[] = [];
+      const conn = await this.getConnection();
 
-    try {
+      try {
       await conn.run("BEGIN TRANSACTION");
 
       const existingEntitiesReader = await conn.runAndReadAll("SELECT name FROM entities");
@@ -417,6 +603,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.logger.error("Error creating entities", extractError(error));
       throw error;
     }
+    });
   }
 
   /**
@@ -509,10 +696,12 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
    * Add observations to entities
    */
   async addObservations(observations: Array<Observation>): Promise<Observation[]> {
-    const addedObservations: Observation[] = [];
-    const conn = await this.getConnection();
+    // Execute bulk write with concurrency control
+    return this.executeWithConcurrencyControl('bulkWrite', async () => {
+      const addedObservations: Observation[] = [];
+      const conn = await this.getConnection();
 
-    try {
+      try {
       await conn.run("BEGIN TRANSACTION");
 
       for (const observation of observations) {
@@ -586,6 +775,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.logger.error("Error adding observations", extractError(error));
       throw error;
     }
+    });
   }
 
   /**
@@ -594,50 +784,54 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   async deleteEntities(entityNames: string[]): Promise<void> {
     if (entityNames.length === 0) return;
 
-    try {
-      const conn = await this.getConnection();
-      const placeholders = entityNames.map(() => "?").join(",");
-
-      // Delete related observations first
-      // ERROR HANDLING STRATEGY: Non-critical cleanup operation
-      // Log error but continue execution - observation cleanup failure
-      // should not prevent entity deletion
+    // Execute deletion with concurrency control
+    return this.executeWithConcurrencyControl('deletion', async () => {
       try {
-        await conn.run(
-          `DELETE FROM observations WHERE entityName IN (${placeholders})`,
-          entityNames
-        );
+        const conn = await this.getConnection();
+        const placeholders = entityNames.map(() => "?").join(",");
+
+        // Delete related observations first
+        // ERROR HANDLING STRATEGY: Non-critical cleanup operation
+        // Log error but continue execution - observation cleanup failure
+        // should not prevent entity deletion
+        try {
+          await conn.run(
+            `DELETE FROM observations WHERE entityName IN (${placeholders})`,
+            entityNames
+          );
+        } catch (error: unknown) {
+          this.logger.error("Error deleting observations", extractError(error));
+          // Continue execution - this is a cleanup operation
+        }
+
+        // Delete related relations
+        // ERROR HANDLING STRATEGY: Non-critical cleanup operation
+        // Log error but continue execution - relation cleanup failure
+        // should not prevent entity deletion
+        try {
+          await conn.run(
+            `DELETE FROM relations WHERE from_entity IN (${placeholders}) OR to_entity IN (${placeholders})`,
+            [...entityNames, ...entityNames]
+          );
+        } catch (error: unknown) {
+          this.logger.error("Error deleting relations", extractError(error));
+          // Continue execution - this is a cleanup operation
+        }
+
+        // Delete entities
+        await conn.run(`DELETE FROM entities WHERE name IN (${placeholders})`, entityNames);
+
+        // Clear entity count cache after successful entity deletion
+        this.clearEntityCountCache();
+
+        // Schedule FTS index rebuild after data changes
+        // This will be properly queued and won't conflict with the deletion
+        await this.scheduleIndexRebuild();
       } catch (error: unknown) {
-        this.logger.error("Error deleting observations", extractError(error));
-        // Continue execution - this is a cleanup operation
+        this.logger.error("Error deleting entities", extractError(error));
+        throw error;
       }
-
-      // Delete related relations
-      // ERROR HANDLING STRATEGY: Non-critical cleanup operation
-      // Log error but continue execution - relation cleanup failure
-      // should not prevent entity deletion
-      try {
-        await conn.run(
-          `DELETE FROM relations WHERE from_entity IN (${placeholders}) OR to_entity IN (${placeholders})`,
-          [...entityNames, ...entityNames]
-        );
-      } catch (error: unknown) {
-        this.logger.error("Error deleting relations", extractError(error));
-        // Continue execution - this is a cleanup operation
-      }
-
-      // Delete entities
-      await conn.run(`DELETE FROM entities WHERE name IN (${placeholders})`, entityNames);
-
-      // Clear entity count cache after successful entity deletion
-      this.clearEntityCountCache();
-
-      // Schedule FTS index rebuild after data changes
-      await this.scheduleIndexRebuild();
-    } catch (error: unknown) {
-      this.logger.error("Error deleting entities", extractError(error));
-      throw error;
-    }
+    });
   }
 
   /**
@@ -866,7 +1060,23 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         GROUP BY e.name, e.entityType, e.created_at
       `);
       
-      // Step 3: Create FTS indexes for entities and observations
+      // Step 3: Check if observations table has id column before creating indexes
+      let hasIdColumn = false;
+      try {
+        const columnCheck = await conn.runAndReadAll(`
+          PRAGMA table_info(observations)
+        `);
+        const columns = columnCheck.getRows();
+        hasIdColumn = columns.some(row => row[1] === 'id');
+        
+        if (!hasIdColumn) {
+          this.logger.warn("Observations table does not have id column, skipping FTS index creation until migration completes");
+        }
+      } catch (checkError) {
+        this.logger.warn("Failed to check observations table structure", extractError(checkError));
+      }
+      
+      // Step 4: Create FTS indexes for entities and observations
       this.logger.debug("Creating FTS indexes...");
       
       // Create FTS index for entities (name only to avoid scalar subquery issues)
@@ -883,24 +1093,38 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         )
       `);
       
-      // Create FTS index for observations (content)
-      // Using 'id' as the unique identifier column
-      await conn.run(`
-        PRAGMA create_fts_index(
-          'observations',
-          'id',
-          'content',
-          stemmer = 'english', 
-          stopwords = 'english',
-          lower = 1,
-          strip_accents = 1,
-          overwrite = 1
-        )
-      `);
-      
-      // Mark FTS as successfully enabled
-      this.ftsEnabled = true;
-      this.logger.info("DuckDB FTS initialized successfully with BM25 search capabilities");
+      // Only create observations FTS index if id column exists
+      if (hasIdColumn) {
+        // Create FTS index for observations (content)
+        // Using 'id' as the unique identifier column
+        await conn.run(`
+          PRAGMA create_fts_index(
+            'observations',
+            'id',
+            'content',
+            stemmer = 'english', 
+            stopwords = 'english',
+            lower = 1,
+            strip_accents = 1,
+            overwrite = 1
+          )
+        `);
+        
+        // Mark FTS as successfully enabled
+        this.ftsEnabled = true;
+        this.logger.info("DuckDB FTS initialized successfully with BM25 search capabilities");
+      } else {
+        // Partial FTS - only entities are indexed
+        this.ftsEnabled = true;
+        this.logger.info("DuckDB FTS initialized partially (entities only). Observations index will be created after migration.");  
+        
+        // Schedule index rebuild for later
+        setTimeout(async () => {
+          if (!this.migrationInProgress && this.ftsEnabled) {
+            await this.scheduleIndexRebuild();
+          }
+        }, 5000); // Check again in 5 seconds
+      }
       
     } catch (error) {
       // FTS initialization failure is non-fatal, log and continue with fallback
@@ -1207,8 +1431,49 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       return;
     }
 
-    try {
+    // Skip if migration is in progress
+    if (this.migrationInProgress || this.concurrencyController.isOperationInProgress('migration')) {
+      this.logger.warn("Migration in progress, skipping FTS index rebuild");
+      return;
+    }
+
+    // Execute FTS rebuild with concurrency control
+    return this.executeWithConcurrencyControl('ftsRebuild', async () => {
+      try {
       const conn = await this.getConnection();
+      
+      // Verify that the tables exist and are not temporary migration tables
+      try {
+        const tableCheck = await conn.runAndReadAll(`
+          SELECT name FROM sqlite_master 
+          WHERE type='table' 
+          AND name IN ('entities', 'observations')
+          AND name NOT LIKE '%_new'
+          AND name NOT LIKE '%_backup'
+        `);
+        
+        const tables = tableCheck.getRows().map(row => row[0] as string);
+        if (!tables.includes('entities') || !tables.includes('observations')) {
+          this.logger.warn(`Required tables not found for FTS indexing. Found tables: ${tables.join(', ')}`);
+          return;
+        }
+        
+        // Also check if the observations table has the id column
+        const columnCheck = await conn.runAndReadAll(`
+          PRAGMA table_info(observations)
+        `);
+        const columns = columnCheck.getRows();
+        const hasIdColumn = columns.some(row => row[1] === 'id');
+        
+        if (!hasIdColumn) {
+          this.logger.warn("Observations table does not have id column, skipping FTS index rebuild");
+          return;
+        }
+      } catch (checkError) {
+        this.logger.error("Failed to verify table structure for FTS indexing", extractError(checkError));
+        return;
+      }
+      
       this.logger.info("Rebuilding FTS indexes...");
 
       // Drop existing indexes
@@ -1254,6 +1519,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.logger.error("Failed to rebuild FTS indexes", extractError(error));
       throw error;
     }
+    });
   }
 
   /**
@@ -2117,6 +2383,12 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       return;
     }
 
+    // Skip if migration is in progress to avoid conflicts with temporary tables
+    if (this.migrationInProgress) {
+      this.logger.debug("Migration in progress, skipping index rebuild scheduling");
+      return;
+    }
+
     // Skip if current entity count is below FTS threshold
     try {
       const entityCount = await this.getCachedEntityCount();
@@ -2140,6 +2412,15 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Schedule new rebuild with debounce
       this.ftsRebuildTimer = setTimeout(async () => {
         try {
+          // Double-check migration status before rebuilding
+          if (this.migrationInProgress) {
+            this.logger.debug("Migration in progress, aborting scheduled FTS index rebuild");
+            this.ftsRebuildTimer = null;
+            // Reschedule for later
+            await this.scheduleIndexRebuild();
+            return;
+          }
+          
           this.logger.debug("Debounce timer expired, starting FTS index rebuild");
           await this.rebuildFTSIndexes();
           this.ftsRebuildTimer = null;
@@ -2156,5 +2437,22 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Handle any timer-related errors gracefully
       this.logger.error("Error scheduling FTS index rebuild", extractError(error));
     }
+  }
+  
+  /**
+   * Get operation status for diagnostics
+   */
+  public getOperationStatus(): {
+    states: Record<OperationType, boolean>;
+    queueLength: number;
+    processingQueue: boolean;
+    queueStats?: any;
+  } {
+    const status = this.concurrencyController.getStatus();
+    const queueStats = this.concurrencyController.getQueueStats();
+    return {
+      ...status,
+      queueStats,
+    };
   }
 }
