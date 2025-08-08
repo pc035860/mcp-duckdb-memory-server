@@ -269,10 +269,10 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Check for orphaned sequences
       try {
         const sequencesResult = await this.connection.runAndReadAll(`
-          SELECT sequencename 
-          FROM pg_catalog.pg_sequences 
-          WHERE schemaname = 'main' 
-          AND sequencename LIKE '%_temp%'
+          SELECT sequence_name 
+          FROM information_schema.sequences 
+          WHERE sequence_schema = 'main' 
+          AND sequence_name LIKE '%_temp%'
         `);
         
         const orphanedSequences = sequencesResult.getRows();
@@ -1129,9 +1129,18 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         // Clear entity count cache after successful entity deletion
         this.clearEntityCountCache();
 
-        // Schedule FTS index rebuild after data changes
-        // This will recreate the FTS index that was dropped above
-        await this.scheduleIndexRebuild();
+        // Rebuild FTS indexes immediately to avoid search gaps
+        if (this.ftsEnabled && !this.concurrencyController.isOperationInProgress('migration')) {
+          try {
+            await this.rebuildFTSIndexes();
+            this.logger.info("FTS indexes rebuilt immediately after entity deletion");
+          } catch (immediateRebuildError) {
+            this.logger.warn("Immediate FTS rebuild failed after deletion, scheduling fallback", extractError(immediateRebuildError));
+            await this.scheduleIndexRebuild();
+          }
+        } else {
+          await this.scheduleIndexRebuild();
+        }
       } catch (error: unknown) {
         this.logger.error("Error deleting entities", extractError(error));
         throw error;

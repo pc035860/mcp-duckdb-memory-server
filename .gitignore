@@ -7,3 +7,29 @@ docker-compose.yml
 .mcp.json
 
 tests/validation/report-*
+
+# Test databases and data files
+*.db
+*.data
+*.data.wal
+memory.*.data
+test-*.db
+
+# Test scripts and reports
+test-*.js
+create-*.js
+test-*.html
+test-*.json
+*.log
+
+# Scripts directory (if for testing)
+scripts/
+
+# Fixed/repacked data files
+*.fixed.data
+*.repacked.data
+*.clean.data
+
+# Migration test files
+test-migration-*.sh
+test-error-recovery.sh
