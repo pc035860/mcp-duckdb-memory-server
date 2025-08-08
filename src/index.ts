@@ -71,6 +71,31 @@ async function main(): Promise<void> {
       process.on("SIGTERM", shutdown);
       process.on("SIGUSR2", shutdown); // nodemon restart
 
+      // Treat stdio closure as shutdown trigger (MCP client lifecycle)
+      // Ensure Node keeps stdin open to receive 'end'/'close'
+      try {
+        process.stdin.resume();
+      } catch {
+        // ignore if already flowing
+      }
+
+      const onStdioClosed = () => {
+        logger.info("Stdio closed - triggering shutdown");
+        // Use next tick to avoid re-entrancy if called during stream callback
+        setImmediate(() => void shutdown());
+      };
+
+      process.stdin.on("end", onStdioClosed);
+      process.stdin.on("close", onStdioClosed);
+
+      // When MCP client closes stdout, writes may emit EPIPE
+      process.stdout.on("error", (err: any) => {
+        const code = (err && (err as any).code) as string | undefined;
+        if (code === "EPIPE" || code === "ERR_STREAM_WRITE_AFTER_END") {
+          onStdioClosed();
+        }
+      });
+
       await secondaryServer.start();
       logger.info("Secondary server is running and connected to stdio");
     }
