@@ -1110,6 +1110,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           // Continue execution - this is a cleanup operation
         }
 
+        // WORKAROUND: Drop FTS index before deleting entities to avoid observations_new error
+        // This is necessary because DuckDB FTS has issues with CASCADE deletes
+        // The FTS index will be recreated by scheduleIndexRebuild()
+        if (this.ftsEnabled) {
+          try {
+            await this.safeDropFTSIndex(conn, 'observations');
+            this.logger.debug("Dropped observations FTS index before entity deletion");
+          } catch (dropError) {
+            // Non-fatal, continue with deletion
+            this.logger.debug("Could not drop observations FTS index", extractError(dropError));
+          }
+        }
+
         // Delete entities
         await conn.run(`DELETE FROM entities WHERE name IN (${placeholders})`, entityNames);
 
@@ -1117,7 +1130,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.clearEntityCountCache();
 
         // Schedule FTS index rebuild after data changes
-        // This will be properly queued and won't conflict with the deletion
+        // This will recreate the FTS index that was dropped above
         await this.scheduleIndexRebuild();
       } catch (error: unknown) {
         this.logger.error("Error deleting entities", extractError(error));
