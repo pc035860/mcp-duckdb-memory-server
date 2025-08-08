@@ -2,6 +2,7 @@
 
 import { DuckDBInstance, DuckDBConnection } from "@duckdb/node-api";
 import { ConsoleLogger, LogLevel } from "../logger.js";
+import { extractError } from "../utils.js";
 import { existsSync } from "fs";
 import { resolve } from "path";
 
@@ -56,7 +57,7 @@ class DatabaseRepairTool {
       this.printRepairReport();
       
     } catch (error) {
-      this.logger.error("Repair failed", error);
+      this.logger.error("Repair failed", extractError(error));
       this.printRepairReport();
       throw error;
     } finally {
@@ -196,7 +197,60 @@ class DatabaseRepairTool {
 
   private async cleanupFTSIndexes(conn: DuckDBConnection): Promise<void> {
     try {
-      // Only try to drop FTS indexes for tables that actually exist
+      // First, clean up orphaned FTS schemas
+      this.log("Check orphaned FTS schemas", "EXECUTING", "Scanning for orphaned schemas");
+      
+      const ftsSchemas = await conn.runAndReadAll(`
+        SELECT schema_name 
+        FROM duckdb_schemas() 
+        WHERE schema_name LIKE 'fts_%'
+      `);
+      
+      const schemas = ftsSchemas.getRows();
+      let orphanedCount = 0;
+      
+      for (const row of schemas) {
+        const schemaName = row[0] as string;
+        
+        // Extract table name from schema name (format: fts_main_{table_name})
+        const match = schemaName.match(/^fts_main_(.+)$/);
+        if (!match) {
+          this.log(`Unexpected FTS schema`, "WARNING", `Schema: ${schemaName}`);
+          continue;
+        }
+        
+        const tableName = match[1];
+        
+        // Check if the corresponding table exists
+        const tableCheck = await conn.runAndReadAll(`
+          SELECT COUNT(*) as count 
+          FROM information_schema.tables 
+          WHERE table_schema = 'main' 
+            AND table_name = '${tableName}'
+        `);
+        
+        const rows = tableCheck.getRows();
+        const tableExists = rows.length > 0 && (rows[0][0] as number) > 0;
+        
+        // Clean up orphaned schemas or temporary table schemas
+        if (!tableExists || tableName.endsWith('_new') || tableName.endsWith('_backup') || tableName.endsWith('_temp')) {
+          try {
+            await conn.run(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+            this.log(`Drop orphaned FTS schema`, "SUCCESS", `${schemaName} removed`);
+            orphanedCount++;
+          } catch (dropError) {
+            this.log(`Drop FTS schema ${schemaName}`, "ERROR", String(dropError));
+          }
+        }
+      }
+      
+      if (orphanedCount > 0) {
+        this.log("Orphaned FTS cleanup", "SUCCESS", `${orphanedCount} schema(s) removed`);
+      } else {
+        this.log("Orphaned FTS cleanup", "CLEAN", "No orphaned schemas found");
+      }
+      
+      // Then drop existing FTS indexes for tables that exist
       const tablesResult = await conn.runAndReadAll(`
         SELECT table_name 
         FROM information_schema.tables 
@@ -388,6 +442,7 @@ Repairs and cleans up a DuckDB knowledge graph database.
 Operations performed:
   - Remove residual observations_new table
   - Fix observations_id_seq sequence
+  - Clean up orphaned FTS schemas (e.g., fts_main_observations_new)
   - Rebuild FTS indexes correctly
   - Verify and fix referential integrity
   - Force WAL checkpoint

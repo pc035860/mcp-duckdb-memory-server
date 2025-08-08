@@ -419,7 +419,69 @@ The new architecture is **not backward compatible** but provides the same MCP in
 
 Your existing DuckDB data will be automatically migrated and preserved.
 
+## Database Migration & FTS Index Management
+
+### Automatic Migration Process
+
+The system automatically handles database schema migrations and FTS index cleanup during startup:
+
+1. **Startup Cleanup**: Removes residual migration artifacts (`*_new`, `*_backup`, `*_temp` tables)
+2. **FTS Cleanup**: Detects and removes orphaned FTS schemas from previous migrations
+3. **Schema Validation**: Ensures proper database structure and constraints
+4. **Index Rebuilding**: Reconstructs FTS indexes with correct table references
+
+### FTS Index Management Features
+
+- **Orphaned Schema Detection**: Automatically identifies FTS schemas pointing to non-existent tables
+- **Smart Cleanup**: Removes temporary table FTS references (e.g., `observations_new`, `observations_backup`)
+- **Static Reference Handling**: DuckDB FTS uses static table references that don't follow table renames
+- **Recovery Mechanisms**: Backup table recovery when main tables are missing
+
+### Database Repair Tool
+
+For manual database maintenance and FTS cleanup:
+
+```bash
+# Run database repair tool
+pnpm run repair-database
+
+# Or execute directly
+node dist/tools/repair-database.js
+```
+
+**Repair Tool Features:**
+- Removes orphaned temporary tables and sequences
+- Cleans up stale FTS schema references
+- Rebuilds FTS indexes with proper table bindings
+- Validates database integrity
+- Safe operation with transaction rollback on errors
+
 ## Troubleshooting
+
+### FTS-Related Issues
+
+#### "Table with name observations_new does not exist" Error
+This occurs when FTS indexes still reference temporary tables from migration:
+
+```bash
+# Automatic fix during startup
+SERVER_MODE=main pnpm start
+
+# Manual repair
+pnpm run repair-database
+
+# Debug FTS issues
+DEBUG=1 SERVER_MODE=main pnpm start
+```
+
+#### FTS Index Corruption
+```bash
+# Force FTS index rebuild
+DEBUG=1 ENTITY_COUNT_THRESHOLD=0 pnpm start
+
+# Check FTS health via MCP tool
+# Use getFTSInfo and checkFTSIndexHealth tools
+```
 
 ### Main Server Won't Start
 ```bash
@@ -437,6 +499,19 @@ ps aux | grep "SERVER_MODE=main"
 ls -la ~/.local/share/duckdb-memory-server/main-server.sock
 ```
 
+### Migration and Database Issues
+```bash
+# Clean up corrupted database state
+rm -f ~/.local/share/duckdb-memory-server/knowledge-graph.data
+SERVER_MODE=main pnpm start
+
+# Force migration with cleanup
+DEBUG=1 SERVER_MODE=main pnpm start
+
+# Check database integrity
+pnpm run repair-database
+```
+
 ### Performance Issues
 ```bash
 # Check queue status (main server logs)
@@ -444,6 +519,9 @@ DEBUG=1 SERVER_MODE=main pnpm start
 
 # Monitor request processing
 tail -f ~/.local/share/duckdb-memory-server/logs/main-server.log
+
+# Force LIKE search instead of FTS
+ENTITY_COUNT_THRESHOLD=999999 SERVER_MODE=main pnpm start
 ```
 
 ## License

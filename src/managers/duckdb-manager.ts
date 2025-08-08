@@ -35,10 +35,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   private entityCountCache: { count: number; timestamp: number } | null = null;
   private readonly CACHE_TTL = 60000; // 1分鐘快取
   
-  // Migration state tracking (kept for backward compatibility)
-  private migrationInProgress: boolean = false;
-  private migrationLock: Promise<void> | null = null;
-  
   // Centralized concurrency controller
   private concurrencyController: ConcurrencyController;
   
@@ -98,6 +94,8 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.instance = await DuckDBInstance.create(this.dbPath);
       this.connection = await this.instance.connect();
 
+      // Clean up any residual migration artifacts from abnormal shutdowns
+      await this.cleanupStartupArtifacts();
 
       // Create tables if they don't exist
       await this.connection.run(`
@@ -172,6 +170,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         }
       }
       
+      // Clean up any orphaned FTS schemas from previous runs or failed migrations
+      await this.cleanupStaleFTSReferences();
+      
       // Handle migration for observations table - add id column if it doesn't exist
       await this.migrateObservationsTable();
 
@@ -198,25 +199,285 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   }
 
   /**
+   * Clean up residual migration artifacts and temporary tables at startup
+   * 
+   * This method performs comprehensive cleanup of leftover database objects from
+   * failed or interrupted migrations, including:
+   * - Temporary tables with suffixes _new, _backup, _temp
+   * - Orphaned sequences from incomplete migrations  
+   * - Recovery of data from backup tables when main tables are missing
+   * 
+   * The cleanup is non-fatal and will log errors but continue operation.
+   * This ensures the database starts in a clean state regardless of previous
+   * migration interruptions. Runs after database connection but before table creation.
+   * 
+   * @private
+   * @async
+   * @returns Promise that resolves when cleanup is complete
+   */
+  private async cleanupStartupArtifacts(): Promise<void> {
+    if (!this.connection) return;
+
+    try {
+      this.logger.debug("Checking for residual migration artifacts...");
+      
+      // Check for and remove temporary tables from failed migrations
+      const tempTablesResult = await this.connection.runAndReadAll(`
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'main' 
+        AND (table_name LIKE '%_new' 
+             OR table_name LIKE '%_backup' 
+             OR table_name LIKE '%_temp')
+      `);
+      
+      const tempTables = tempTablesResult.getRows();
+      if (tempTables.length > 0) {
+        this.logger.info(`Found ${tempTables.length} temporary table(s) to clean up`);
+        
+        for (const row of tempTables) {
+          const tableName = row[0] as string;
+          try {
+            // Special handling for observations_backup - check if we need to recover data
+            if (tableName === 'observations_backup') {
+              // Check if observations table exists and has data
+              const obsCheck = await this.connection.runAndReadAll(`
+                SELECT COUNT(*) FROM information_schema.tables 
+                WHERE table_schema = 'main' AND table_name = 'observations'
+              `);
+              
+              if (obsCheck.getRows()[0][0] === 0) {
+                // observations table doesn't exist, might need to recover from backup
+                this.logger.warn("Found observations_backup but no observations table - attempting recovery");
+                await this.connection.run(`ALTER TABLE observations_backup RENAME TO observations`);
+                this.logger.info("Recovered observations table from backup");
+                continue;
+              }
+            }
+            
+            // Drop the temporary table
+            await this.connection.run(`DROP TABLE IF EXISTS "${tableName}"`);
+            this.logger.info(`Cleaned up temporary table: ${tableName}`);
+          } catch (dropError) {
+            this.logger.warn(`Failed to drop temporary table ${tableName}`, extractError(dropError));
+          }
+        }
+      } else {
+        this.logger.debug("No temporary tables found");
+      }
+      
+      // Check for orphaned sequences
+      try {
+        const sequencesResult = await this.connection.runAndReadAll(`
+          SELECT sequence_name 
+          FROM information_schema.sequences 
+          WHERE sequence_schema = 'main' 
+          AND sequence_name LIKE '%_temp%'
+        `);
+        
+        const orphanedSequences = sequencesResult.getRows();
+        for (const row of orphanedSequences) {
+          const seqName = row[0] as string;
+          try {
+            await this.connection.run(`DROP SEQUENCE IF EXISTS "${seqName}"`);
+            this.logger.info(`Cleaned up orphaned sequence: ${seqName}`);
+          } catch (dropSeqError) {
+            this.logger.warn(`Failed to drop sequence ${seqName}`, extractError(dropSeqError));
+          }
+        }
+      } catch (seqError) {
+        // Sequence cleanup is non-critical
+        this.logger.debug("Sequence cleanup skipped", extractError(seqError));
+      }
+      
+    } catch (cleanupError) {
+      // Startup cleanup is non-fatal - log and continue
+      this.logger.warn("Startup cleanup encountered issues but continuing", extractError(cleanupError));
+    }
+  }
+
+  /**
+   * Cleanup stale FTS references from orphaned or temporary tables
+   * 
+   * DuckDB FTS creates separate schemas (fts_main_{table_name}) for each indexed table.
+   * These schemas use static table references that don't automatically update when
+   * tables are renamed, dropped, or recreated during migrations.
+   * 
+   * This method:
+   * 1. Queries all existing FTS schemas using duckdb_schemas()
+   * 2. Checks if the corresponding base table still exists
+   * 3. Identifies orphaned schemas from temporary tables (_new, _backup, _temp)
+   * 4. Safely drops orphaned schemas with CASCADE to remove all dependencies
+   * 5. Performs additional cleanup for known problematic schema patterns
+   * 
+   * The cleanup is essential for preventing "Table with name X does not exist"
+   * errors when FTS indexes try to reference dropped or renamed tables.
+   * 
+   * @private
+   * @async
+   * @returns Promise that resolves when FTS cleanup is complete
+   * @throws Non-fatal errors are logged but don't interrupt the process
+   */
+  private async cleanupStaleFTSReferences(): Promise<void> {
+    try {
+      const conn = await this.getConnection();
+      
+      // Query all FTS schemas
+      this.logger.debug("Checking for orphaned FTS schemas...");
+      
+      try {
+        const ftsSchemas = await conn.runAndReadAll(`
+          SELECT schema_name 
+          FROM duckdb_schemas() 
+          WHERE schema_name LIKE 'fts_%'
+        `);
+        
+        const schemas = ftsSchemas.getRows();
+        if (schemas.length === 0) {
+          this.logger.debug("No FTS schemas found");
+          return;
+        }
+        
+        this.logger.debug(`Found ${schemas.length} FTS schema(s) to check`);
+        const orphanedSchemas: string[] = [];
+        
+        for (const row of schemas) {
+          const schemaName = row[0] as string;
+          
+          // Extract table name from schema name
+          // FTS schemas follow pattern: fts_main_{table_name}
+          const match = schemaName.match(/^fts_main_(.+)$/);
+          if (!match) {
+            this.logger.warn(`Unexpected FTS schema name format: ${schemaName}`);
+            continue;
+          }
+          
+          const tableName = match[1];
+          
+          // Check if the corresponding table exists
+          const tableCheck = await conn.runAndReadAll(`
+            SELECT COUNT(*) as count 
+            FROM information_schema.tables 
+            WHERE table_schema = 'main' 
+              AND table_name = ?
+          `, [tableName]);
+          
+          const tableExists = (tableCheck.getRows()[0][0] as number) > 0;
+          
+          if (!tableExists) {
+            this.logger.warn(`Found orphaned FTS schema '${schemaName}' for non-existent table '${tableName}'`);
+            orphanedSchemas.push(schemaName);
+          } else {
+            // Also check for temporary table patterns that should be cleaned
+            if (tableName.endsWith('_new') || tableName.endsWith('_backup') || tableName.endsWith('_temp')) {
+              this.logger.warn(`Found FTS schema '${schemaName}' for temporary table '${tableName}'`);
+              orphanedSchemas.push(schemaName);
+            }
+          }
+        }
+        
+        // Drop orphaned schemas
+        if (orphanedSchemas.length > 0) {
+          this.logger.info(`Cleaning up ${orphanedSchemas.length} orphaned FTS schema(s)`);
+          
+          for (const schemaName of orphanedSchemas) {
+            try {
+              this.logger.debug(`Dropping orphaned FTS schema: ${schemaName}`);
+              
+              // Use CASCADE to ensure complete cleanup
+              await conn.run(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+              
+              this.logger.info(`Successfully dropped orphaned FTS schema: ${schemaName}`);
+            } catch (dropError) {
+              // Log error but continue with other schemas
+              this.logger.error(`Failed to drop FTS schema '${schemaName}'`, extractError(dropError));
+            }
+          }
+          
+          this.logger.info("FTS cleanup completed");
+        } else {
+          this.logger.debug("No orphaned FTS schemas found");
+        }
+      } catch (schemaError) {
+        // duckdb_schemas() might not be available in older versions
+        this.logger.debug("Could not query FTS schemas, skipping dynamic cleanup", extractError(schemaError));
+      }
+      
+      // Alternative cleanup: Try to drop known problematic FTS schemas
+      const problematicSchemas = ['fts_main_observations_new', 'fts_main_observations_backup'];
+      for (const schema of problematicSchemas) {
+        try {
+          await conn.run(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+          this.logger.debug(`Cleaned up potentially problematic schema: ${schema}`);
+        } catch (e) {
+          // Schema might not exist, that's fine
+        }
+      }
+      
+    } catch (error) {
+      // Cleanup errors are non-fatal, just log them
+      this.logger.warn("Error during FTS cleanup", extractError(error));
+    }
+  }
+
+  /**
    * Migrate observations table to add id column with proper transaction handling
    */
   private async migrateObservationsTable(): Promise<void> {
-    // Prevent concurrent migrations
-    if (this.migrationInProgress || (this.concurrencyController && this.concurrencyController.isOperationInProgress('migration'))) {
-      this.logger.warn("Migration already in progress, waiting for completion");
-      if (this.migrationLock) {
-        await this.migrationLock;
-      }
+    // Use ConcurrencyController to manage migration
+    await this.executeWithConcurrencyControl('migration', async () => {
+      await this.performObservationsMigration();
+    });
+  }
+
+  /**
+   * Drop all FTS indexes to prevent references to temporary tables
+   */
+  /**
+   * Drop all FTS indexes before database migration
+   * 
+   * This method is crucial for safe database migrations because DuckDB FTS
+   * indexes maintain static references to table names. When tables are renamed
+   * or restructured during migration, these references become invalid.
+   * 
+   * The method:
+   * 1. Checks if FTS is enabled before attempting operations
+   * 2. Iterates through main indexed tables (entities, observations)
+   * 3. Uses PRAGMA drop_fts_index to cleanly remove indexes
+   * 4. Continues on errors since indexes might not exist
+   * 
+   * After successful migration, FTS indexes should be rebuilt using
+   * rebuildFTSIndexes() to restore full-text search functionality.
+   * 
+   * @private
+   * @async
+   * @param conn - Active DuckDB connection to use for operations
+   * @returns Promise that resolves when all indexes are dropped
+   * @throws Non-fatal errors are logged but don't interrupt migration
+   */
+  private async dropAllFTSIndexes(conn: DuckDBConnection): Promise<void> {
+    if (!this.ftsEnabled) {
       return;
     }
-
-    // Create migration promise for other concurrent calls to wait on
-    this.migrationLock = this.performObservationsMigration();
     
     try {
-      await this.migrationLock;
-    } finally {
-      this.migrationLock = null;
+      // Drop FTS indexes for main tables
+      const tablesToDrop = ['entities', 'observations'];
+      
+      for (const tableName of tablesToDrop) {
+        try {
+          await conn.run(`PRAGMA drop_fts_index('${tableName}')`);
+          this.logger.debug(`Dropped FTS index for table: ${tableName}`);
+        } catch (dropError) {
+          // Index might not exist, that's fine
+          this.logger.debug(`FTS index for ${tableName} might not exist, continuing...`);
+        }
+      }
+      
+      this.logger.info("All FTS indexes dropped successfully");
+    } catch (error) {
+      this.logger.warn("Error dropping FTS indexes", extractError(error));
+      // Non-critical, continue with migration
     }
   }
 
@@ -224,13 +485,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
    * Perform the actual observations table migration
    */
   private async performObservationsMigration(): Promise<void> {
-    this.migrationInProgress = true;
     let transactionStarted = false;
     let backupTableCreated = false;
+    let ftsIndexesDropped = false;
     
     try {
+      const conn = await this.getConnection();
+      
+      // Clean up any stale FTS references before migration
+      this.logger.debug("Cleaning up stale FTS references before migration");
+      await this.cleanupStaleFTSReferences();
+      
       // Check if id column exists
-      const result = await this.connection.runAndReadAll(`
+      const result = await conn.runAndReadAll(`
         SELECT column_name FROM information_schema.columns 
         WHERE table_name = 'observations' AND column_name = 'id'
       `);
@@ -238,13 +505,23 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       if (result.getRows().length === 0) {
         this.logger.info("Starting observations table migration to add id column");
         
+        // Drop FTS indexes BEFORE starting migration to prevent references to temporary tables
+        if (this.ftsEnabled) {
+          this.logger.info("Dropping FTS indexes before migration to prevent orphaned references");
+          await this.dropAllFTSIndexes(conn);
+          ftsIndexesDropped = true;
+          
+          // Also clean up any stale FTS references that might exist
+          await this.cleanupStaleFTSReferences();
+        }
+        
         // Start transaction for atomic migration
-        await this.connection.run(`BEGIN TRANSACTION`);
+        await conn.run(`BEGIN TRANSACTION`);
         transactionStarted = true;
         this.logger.debug("Migration transaction started");
         
         // Create backup table first (for recovery if needed)
-        await this.connection.run(`
+        await conn.run(`
           CREATE TABLE observations_backup AS 
           SELECT * FROM observations
         `);
@@ -252,19 +529,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug("Backup table created");
         
         // Get row count for verification
-        const countResult = await this.connection.runAndReadAll(`
+        const countResult = await conn.runAndReadAll(`
           SELECT COUNT(*) as count FROM observations
         `);
-        const originalCount = countResult.getRows()[0].count;
+        const originalCount = countResult.getRows()[0][0] as number;
         this.logger.debug(`Original observations count: ${originalCount}`);
         
         // Create sequence if it doesn't exist
-        await this.connection.run(`
+        await conn.run(`
           CREATE SEQUENCE IF NOT EXISTS observations_id_seq
         `);
         
         // Create new table with id column
-        await this.connection.run(`
+        await conn.run(`
           CREATE TABLE observations_new (
             id INTEGER PRIMARY KEY DEFAULT nextval('observations_id_seq'),
             entityName VARCHAR,
@@ -276,7 +553,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug("New observations table created with id column");
         
         // Copy data from old table with explicit column mapping
-        await this.connection.run(`
+        await conn.run(`
           INSERT INTO observations_new (entityName, content, created_at)
           SELECT entityName, content, 
                  COALESCE(created_at, CURRENT_TIMESTAMP) as created_at 
@@ -285,10 +562,10 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug("Data copied to new table");
         
         // Verify row count matches
-        const newCountResult = await this.connection.runAndReadAll(`
+        const newCountResult = await conn.runAndReadAll(`
           SELECT COUNT(*) as count FROM observations_new
         `);
-        const newCount = newCountResult.getRows()[0].count;
+        const newCount = newCountResult.getRows()[0][0] as number;
         
         if (originalCount !== newCount) {
           throw new Error(`Row count mismatch during migration: original=${originalCount}, new=${newCount}`);
@@ -296,42 +573,45 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug(`Row count verified: ${newCount} rows migrated successfully`);
         
         // Drop old table
-        await this.connection.run(`DROP TABLE observations`);
+        await conn.run(`DROP TABLE observations`);
         this.logger.debug("Old observations table dropped");
         
         // Rename new table to observations
-        await this.connection.run(`ALTER TABLE observations_new RENAME TO observations`);
+        await conn.run(`ALTER TABLE observations_new RENAME TO observations`);
         this.logger.debug("New table renamed to observations");
         
         // Create indexes for better performance
-        await this.connection.run(`
+        await conn.run(`
           CREATE INDEX IF NOT EXISTS idx_observations_entityName 
           ON observations(entityName)
         `);
-        await this.connection.run(`
+        await conn.run(`
           CREATE INDEX IF NOT EXISTS idx_observations_created_at 
           ON observations(created_at)
         `);
         this.logger.debug("Indexes created on observations table");
         
         // Drop backup table after successful migration
-        await this.connection.run(`DROP TABLE IF EXISTS observations_backup`);
+        await conn.run(`DROP TABLE IF EXISTS observations_backup`);
         this.logger.debug("Backup table dropped after successful migration");
         
         // Commit transaction
-        await this.connection.run(`COMMIT`);
+        await conn.run(`COMMIT`);
         transactionStarted = false;
         
         this.logger.info(`Observations table migration completed successfully. Migrated ${newCount} rows.`);
         
-        // Mark FTS indexes as needing rebuild if FTS is enabled
-        // Note: Migration is already marked as complete at this point (in finally block)
-        // So we need to set a flag or schedule rebuild with a delay
+        // Clean up any stale FTS references that might have been created during migration
         if (this.ftsEnabled) {
+          this.logger.info("Cleaning up any stale FTS references after migration");
+          await this.cleanupStaleFTSReferences();
+          
+          // Now schedule FTS index rebuild after ensuring no orphaned references exist
           this.logger.info("Scheduling FTS index rebuild after migration with extra delay");
           // Use a longer delay after migration to ensure all operations are complete
           setTimeout(async () => {
-            if (!this.migrationInProgress && this.ftsEnabled) {
+            // Double-check that migration is truly complete before rebuilding
+            if (this.ftsEnabled && !this.concurrencyController.isOperationInProgress('migration')) {
               await this.scheduleIndexRebuild();
             }
           }, 2000); // 2 second delay after migration
@@ -346,7 +626,8 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       if (transactionStarted) {
         try {
           this.logger.info("Rolling back migration transaction");
-          await this.connection.run(`ROLLBACK`);
+          const conn = await this.getConnection();
+          await conn.run(`ROLLBACK`);
           this.logger.info("Migration transaction rolled back successfully");
           
           // Attempt to restore from backup if it exists
@@ -355,27 +636,39 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
               this.logger.info("Attempting to restore from backup table");
               
               // Check if observations table still exists
-              const tableCheck = await this.connection.runAndReadAll(`
+              const tableCheck = await conn.runAndReadAll(`
                 SELECT COUNT(*) as count 
                 FROM information_schema.tables 
                 WHERE table_schema = 'main' AND table_name = 'observations'
               `);
               
-              if (tableCheck.getRows()[0].count === 0) {
+              if (tableCheck.getRows()[0][0] === 0) {
                 // Observations table was dropped, restore from backup
-                await this.connection.run(`
+                await conn.run(`
                   ALTER TABLE observations_backup RENAME TO observations
                 `);
                 this.logger.info("Successfully restored observations table from backup");
               } else {
                 // Clean up backup table if observations still exists
-                await this.connection.run(`DROP TABLE IF EXISTS observations_backup`);
+                await conn.run(`DROP TABLE IF EXISTS observations_backup`);
                 this.logger.debug("Cleaned up backup table");
               }
               
               // Clean up any partial tables
-              await this.connection.run(`DROP TABLE IF EXISTS observations_new`);
+              await conn.run(`DROP TABLE IF EXISTS observations_new`);
               this.logger.debug("Cleaned up partial migration tables");
+              
+              // Clean up any FTS references to the failed migration tables
+              if (this.ftsEnabled && ftsIndexesDropped) {
+                this.logger.info("Cleaning up FTS references after failed migration");
+                await this.cleanupStaleFTSReferences();
+                // Try to rebuild FTS indexes if tables are in good state
+                try {
+                  await this.rebuildFTSIndexes();
+                } catch (ftsError) {
+                  this.logger.warn("Failed to rebuild FTS indexes after migration rollback", extractError(ftsError));
+                }
+              }
             } catch (restoreError) {
               this.logger.error("Failed to restore from backup", extractError(restoreError));
               // At this point, manual intervention may be required
@@ -392,8 +685,6 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Log the original error but don't throw it for non-critical migrations
       // This allows the application to continue even if migration fails
       this.logger.warn("Observations migration skipped due to error. Application will continue with existing schema.");
-    } finally {
-      this.migrationInProgress = false;
     }
   }
 
@@ -1121,7 +1412,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         
         // Schedule index rebuild for later
         setTimeout(async () => {
-          if (!this.migrationInProgress && this.ftsEnabled) {
+          if (!this.concurrencyController.isOperationInProgress('migration') && this.ftsEnabled) {
             await this.scheduleIndexRebuild();
           }
         }, 5000); // Check again in 5 seconds
@@ -1423,8 +1714,65 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     }
   }
 
+
+  /**
+   * Safely drop FTS index with fallback strategies
+   */
+  /**
+   * Safely drop an FTS index using multiple fallback strategies
+   * 
+   * This method implements a defensive three-tier approach to FTS index removal:
+   * 
+   * Tier 1: PRAGMA drop_fts_index - The standard DuckDB method
+   * - Cleanly removes the FTS index and associated schema
+   * - Preferred method when the index exists and is healthy
+   * 
+   * Tier 2: Direct schema drop with CASCADE
+   * - Drops the entire FTS schema (fts_main_{table_name})
+   * - Used when PRAGMA fails due to corrupted index state
+   * - CASCADE ensures all dependent objects are removed
+   * 
+   * Tier 3: Silent continuation
+   * - If both methods fail, assumes index doesn't exist
+   * - Logs the attempt but doesn't fail the operation
+   * 
+   * This multi-tier approach ensures robustness against various FTS corruption
+   * scenarios that can occur during migrations or system interruptions.
+   * 
+   * @private
+   * @async
+   * @param conn - Active DuckDB connection for the operation
+   * @param tableName - Name of the table whose FTS index should be dropped
+   * @returns Promise that resolves when drop attempt is complete
+   */
+  private async safeDropFTSIndex(conn: DuckDBConnection, tableName: string): Promise<void> {
+    const schemaName = `fts_main_${tableName}`;
+    
+    try {
+      // First attempt: Use PRAGMA drop_fts_index
+      await conn.run(`PRAGMA drop_fts_index('${tableName}')`);
+      this.logger.debug(`Successfully dropped FTS index for ${tableName} using PRAGMA`);
+      return;
+    } catch (pragmaError) {
+      this.logger.debug(`PRAGMA drop_fts_index failed for ${tableName}, trying schema drop...`, extractError(pragmaError));
+    }
+    
+    try {
+      // Second attempt: Drop the FTS schema directly
+      await conn.run(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+      this.logger.debug(`Successfully dropped FTS schema ${schemaName} directly`);
+      return;
+    } catch (schemaError) {
+      this.logger.debug(`Direct schema drop failed for ${schemaName}`, extractError(schemaError));
+    }
+    
+    // If both methods fail, log but continue
+    this.logger.debug(`Could not drop FTS index/schema for ${tableName}, it might not exist`);
+  }
+
   /**
    * Rebuild FTS indexes (useful for maintenance or after bulk data changes)
+   * Now with improved error handling and self-healing capabilities
    */
   async rebuildFTSIndexes(): Promise<void> {
     if (!this.ftsEnabled) {
@@ -1433,17 +1781,22 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     }
 
     // Skip if migration is in progress
-    if (this.migrationInProgress || this.concurrencyController.isOperationInProgress('migration')) {
+    if (this.concurrencyController.isOperationInProgress('migration')) {
       this.logger.warn("Migration in progress, skipping FTS index rebuild");
       return;
     }
 
     // Execute FTS rebuild with concurrency control
     return this.executeWithConcurrencyControl('ftsRebuild', async () => {
-      try {
       const conn = await this.getConnection();
       
-      // Verify that the tables exist and are not temporary migration tables
+      // Step 1: Clean up any stale FTS references BEFORE attempting to drop indexes
+      await this.cleanupStaleFTSReferences();
+      
+      // Step 2: Verify that the tables exist and are not temporary migration tables
+      let tablesReady = false;
+      let hasIdColumn = false;
+      
       try {
         const tableCheck = await conn.runAndReadAll(`
           SELECT table_name 
@@ -1452,24 +1805,47 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           AND table_name IN ('entities', 'observations')
           AND table_name NOT LIKE '%_new'
           AND table_name NOT LIKE '%_backup'
+          AND table_name NOT LIKE '%_temp'
         `);
         
         const tables = tableCheck.getRows().map(row => row[0] as string);
-        if (!tables.includes('entities') || !tables.includes('observations')) {
+        tablesReady = tables.includes('entities') && tables.includes('observations');
+        
+        if (!tablesReady) {
           this.logger.warn(`Required tables not found for FTS indexing. Found tables: ${tables.join(', ')}`);
           return;
         }
         
-        // Also check if the observations table has the id column
+        // Also check for any temporary tables that might interfere
+        const tempTableCheck = await conn.runAndReadAll(`
+          SELECT table_name 
+          FROM information_schema.tables 
+          WHERE table_schema = 'main'
+          AND (table_name LIKE 'observations_new' 
+               OR table_name LIKE 'observations_backup'
+               OR table_name LIKE 'observations_temp'
+               OR table_name LIKE 'entities_new'
+               OR table_name LIKE 'entities_backup'
+               OR table_name LIKE 'entities_temp')
+        `);
+        
+        const tempTables = tempTableCheck.getRows().map(row => row[0] as string);
+        if (tempTables.length > 0) {
+          this.logger.warn(`Found temporary tables that might interfere with FTS indexing: ${tempTables.join(', ')}. Aborting FTS rebuild.`);
+          // Clean up FTS references to these temporary tables
+          await this.cleanupStaleFTSReferences();
+          return;
+        }
+        
+        // Check if the observations table has the id column
         const columnCheck = await conn.runAndReadAll(`
           PRAGMA table_info(observations)
         `);
         const columns = columnCheck.getRows();
-        const hasIdColumn = columns.some(row => row[1] === 'id');
+        hasIdColumn = columns.some(row => row[1] === 'id');
         
         if (!hasIdColumn) {
-          this.logger.warn("Observations table does not have id column, skipping FTS index rebuild");
-          return;
+          this.logger.warn("Observations table does not have id column, skipping observations FTS index");
         }
       } catch (checkError) {
         this.logger.error("Failed to verify table structure for FTS indexing", extractError(checkError));
@@ -1477,50 +1853,59 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       }
       
       this.logger.info("Rebuilding FTS indexes...");
-
-      // Drop existing indexes
+      
+      // Step 3: Drop existing indexes with improved error handling
+      // Each table's FTS operations are wrapped in separate try-catch
+      
+      // Handle entities table FTS
       try {
-        await conn.run("PRAGMA drop_fts_index('entities')");
-        await conn.run("PRAGMA drop_fts_index('observations')");
-        this.logger.debug("Existing FTS indexes dropped");
-      } catch (dropError) {
-        // Indexes might not exist, continue
-        this.logger.debug("Some FTS indexes might not exist, continuing...", extractError(dropError));
+        await this.safeDropFTSIndex(conn, 'entities');
+        
+        // Recreate entities index
+        await conn.run(`
+          PRAGMA create_fts_index(
+            'entities', 
+            'name', 
+            'name',
+            stemmer = 'english',
+            stopwords = 'english',
+            lower = 1,
+            strip_accents = 1,
+            overwrite = 1
+          )
+        `);
+        this.logger.info("Entities FTS index rebuilt successfully");
+      } catch (entitiesError) {
+        this.logger.error("Failed to rebuild entities FTS index", extractError(entitiesError));
+        // Continue with observations even if entities fails
       }
-
-      // Recreate indexes
-      await conn.run(`
-        PRAGMA create_fts_index(
-          'entities', 
-          'name', 
-          'name',
-          stemmer = 'english',
-          stopwords = 'english',
-          lower = 1,
-          strip_accents = 1,
-          overwrite = 1
-        )
-      `);
-
-      await conn.run(`
-        PRAGMA create_fts_index(
-          'observations',
-          'id',
-          'content',
-          stemmer = 'english', 
-          stopwords = 'english',
-          lower = 1,
-          strip_accents = 1,
-          overwrite = 1
-        )
-      `);
-
-      this.logger.info("FTS indexes rebuilt successfully");
-
-    } catch (error) {
-      this.logger.error("Failed to rebuild FTS indexes", extractError(error));
-      throw error;
-    }
+      
+      // Handle observations table FTS (only if it has id column)
+      if (hasIdColumn) {
+        try {
+          await this.safeDropFTSIndex(conn, 'observations');
+          
+          // Recreate observations index
+          await conn.run(`
+            PRAGMA create_fts_index(
+              'observations',
+              'id',
+              'content',
+              stemmer = 'english', 
+              stopwords = 'english',
+              lower = 1,
+              strip_accents = 1,
+              overwrite = 1
+            )
+          `);
+          this.logger.info("Observations FTS index rebuilt successfully");
+        } catch (observationsError) {
+          this.logger.error("Failed to rebuild observations FTS index", extractError(observationsError));
+          // Non-fatal, search will fall back to LIKE queries
+        }
+      }
+      
+      this.logger.info("FTS index rebuild process completed");
     });
   }
 
@@ -1647,6 +2032,98 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         searchStrategy: 'ILIKE',
         indexCount: 0
       };
+    }
+  }
+
+  /**
+   * Manually trigger cleanup of orphaned FTS schemas
+   * This is useful for maintenance or after failed migrations
+   * @returns Promise<{ cleaned: number; schemas: string[] }> - Information about cleaned schemas
+   */
+  async cleanupOrphanedFTSSchemas(): Promise<{ cleaned: number; schemas: string[] }> {
+    // Check if manager is closed
+    if (this.closed) {
+      throw new Error("Manager has been closed");
+    }
+
+    const cleanedSchemas: string[] = [];
+    
+    try {
+      const conn = await this.getConnection();
+      
+      // Query all FTS schemas
+      this.logger.info("Starting manual FTS cleanup...");
+      const ftsSchemas = await conn.runAndReadAll(`
+        SELECT schema_name 
+        FROM duckdb_schemas() 
+        WHERE schema_name LIKE 'fts_%'
+      `);
+      
+      const schemas = ftsSchemas.getRows();
+      if (schemas.length === 0) {
+        this.logger.info("No FTS schemas found during manual cleanup");
+        return { cleaned: 0, schemas: [] };
+      }
+      
+      this.logger.info(`Found ${schemas.length} FTS schema(s) to check during manual cleanup`);
+      
+      for (const row of schemas) {
+        const schemaName = row[0] as string;
+        
+        // Extract table name from schema name
+        const match = schemaName.match(/^fts_main_(.+)$/);
+        if (!match) {
+          this.logger.warn(`Unexpected FTS schema name format during cleanup: ${schemaName}`);
+          continue;
+        }
+        
+        const tableName = match[1];
+        
+        // Check if the corresponding table exists
+        const tableCheck = await conn.runAndReadAll(`
+          SELECT COUNT(*) as count 
+          FROM information_schema.tables 
+          WHERE table_schema = 'main' 
+            AND table_name = '${tableName}'
+        `);
+        
+        const rows = tableCheck.getRows();
+        const tableExists = rows.length > 0 && (rows[0][0] as number) > 0;
+        
+        // Determine if this schema should be cleaned
+        let shouldClean = false;
+        
+        if (!tableExists) {
+          this.logger.warn(`Found orphaned FTS schema '${schemaName}' for non-existent table '${tableName}'`);
+          shouldClean = true;
+        } else if (tableName.endsWith('_new') || tableName.endsWith('_backup') || tableName.endsWith('_temp')) {
+          this.logger.warn(`Found FTS schema '${schemaName}' for temporary table '${tableName}'`);
+          shouldClean = true;
+        }
+        
+        if (shouldClean) {
+          try {
+            this.logger.info(`Dropping orphaned FTS schema: ${schemaName}`);
+            await conn.run(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+            cleanedSchemas.push(schemaName);
+            this.logger.info(`Successfully dropped orphaned FTS schema: ${schemaName}`);
+          } catch (dropError) {
+            this.logger.error(`Failed to drop FTS schema '${schemaName}'`, extractError(dropError));
+          }
+        }
+      }
+      
+      if (cleanedSchemas.length > 0) {
+        this.logger.info(`Manual FTS cleanup completed. Cleaned ${cleanedSchemas.length} schema(s)`);
+      } else {
+        this.logger.info("Manual FTS cleanup completed. No orphaned schemas found.");
+      }
+      
+      return { cleaned: cleanedSchemas.length, schemas: cleanedSchemas };
+      
+    } catch (error) {
+      this.logger.error("Error during manual FTS cleanup", extractError(error));
+      throw error;
     }
   }
 
@@ -2386,7 +2863,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     }
 
     // Skip if migration is in progress to avoid conflicts with temporary tables
-    if (this.migrationInProgress) {
+    if (this.concurrencyController.isOperationInProgress('migration')) {
       this.logger.debug("Migration in progress, skipping index rebuild scheduling");
       return;
     }
@@ -2415,7 +2892,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.ftsRebuildTimer = setTimeout(async () => {
         try {
           // Double-check migration status before rebuilding
-          if (this.migrationInProgress) {
+          if (this.concurrencyController.isOperationInProgress('migration')) {
             this.logger.debug("Migration in progress, aborting scheduled FTS index rebuild");
             this.ftsRebuildTimer = null;
             // Reschedule for later

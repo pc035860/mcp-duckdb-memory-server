@@ -717,6 +717,359 @@ describe('Observations New Error Fix Test Suite', () => {
     });
   });
 
+  describe('FTS Cleanup and Recovery Tests', () => {
+    it('should cleanup orphaned FTS schemas on startup', async () => {
+      // Create a database with orphaned FTS schemas
+      testDbPath = generateUniqueDbPath('orphaned-fts');
+      const debugLogger = new ConsoleLogger('debug');
+      
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        10
+      );
+      
+      await manager.initialize();
+
+      try {
+        // Create entities to trigger FTS
+        const entities = [];
+        for (let i = 1; i <= 15; i++) {
+          entities.push({
+            name: `orphan-test-${i}`,
+            entityType: 'test',
+            observations: [`test data ${i}`],
+            createdAt: new Date().toISOString()
+          });
+        }
+        await manager.createEntities(entities);
+        
+        // Close manager
+        await manager.close();
+        
+        // Simulate orphaned FTS schemas by reopening and closing quickly multiple times
+        for (let i = 0; i < 3; i++) {
+          const tempManager = new DuckDBKnowledgeGraphManager(
+            () => testDbPath,
+            debugLogger,
+            false,
+            10
+          );
+          await tempManager.initialize();
+          // Don't wait for FTS to complete
+          await tempManager.close();
+        }
+        
+        // Now reopen with cleanup - should handle orphaned schemas
+        manager = new DuckDBKnowledgeGraphManager(
+          () => testDbPath,
+          debugLogger,
+          false,
+          10
+        );
+        await manager.initialize();
+        
+        // Should be able to perform operations without FTS errors
+        await expect(manager.deleteEntities(['orphan-test-1'])).resolves.toBeUndefined();
+        
+        // Search should work
+        const searchResult = await manager.searchNodes('test data');
+        expect(searchResult.entities.length).toBeGreaterThan(0);
+      } finally {
+        await safeCloseManager(manager);
+        await cleanupTestDb(testDbPath);
+      }
+    });
+
+    it('should cleanup startup artifacts from failed migrations', async () => {
+      testDbPath = generateUniqueDbPath('startup-artifacts');
+      const debugLogger = new ConsoleLogger('debug');
+      
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        10
+      );
+      
+      await manager.initialize();
+
+      try {
+        // Create some test data
+        await manager.createEntities([
+          {
+            name: 'artifact-test',
+            entityType: 'test',
+            observations: ['test observation'],
+            createdAt: new Date().toISOString()
+          }
+        ]);
+        
+        // Close manager
+        await manager.close();
+        
+        // Reopen - startup cleanup should run
+        manager = new DuckDBKnowledgeGraphManager(
+          () => testDbPath,
+          debugLogger,
+          false,
+          10
+        );
+        await manager.initialize();
+        
+        // Operations should work smoothly
+        await manager.deleteEntities(['artifact-test']);
+        
+        // Create new entities
+        await manager.createEntities([
+          {
+            name: 'new-after-cleanup',
+            entityType: 'test',
+            observations: ['post cleanup'],
+            createdAt: new Date().toISOString()
+          }
+        ]);
+        
+        const result = await manager.readGraph();
+        expect(result.entities).toHaveLength(1);
+        expect(result.entities[0].name).toBe('new-after-cleanup');
+      } finally {
+        await safeCloseManager(manager);
+        await cleanupTestDb(testDbPath);
+      }
+    });
+
+    it('should properly drop all FTS indexes before migration', async () => {
+      testDbPath = generateUniqueDbPath('drop-fts-before-migration');
+      const debugLogger = new ConsoleLogger('debug');
+      
+      // Create initial database with FTS
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        5 // Low threshold to trigger FTS
+      );
+      
+      await manager.initialize();
+
+      try {
+        // Create entities to trigger FTS
+        const entities = [];
+        for (let i = 1; i <= 10; i++) {
+          entities.push({
+            name: `pre-migration-${i}`,
+            entityType: 'test',
+            observations: [`observation ${i}`],
+            createdAt: new Date().toISOString()
+          });
+        }
+        await manager.createEntities(entities);
+        
+        // Wait for FTS to be built
+        await new Promise(resolve => setTimeout(resolve, 6000));
+        
+        // Close manager
+        await manager.close();
+        
+        // Reopen - this should trigger migration check and FTS cleanup
+        manager = new DuckDBKnowledgeGraphManager(
+          () => testDbPath,
+          debugLogger,
+          false,
+          5
+        );
+        await manager.initialize();
+        
+        // Delete operations should work without observations_new error
+        await manager.deleteEntities(['pre-migration-1', 'pre-migration-2']);
+        
+        // Search should still work after migration
+        const searchResult = await manager.searchNodes('observation');
+        expect(searchResult.entities.length).toBe(8);
+      } finally {
+        await safeCloseManager(manager);
+        await cleanupTestDb(testDbPath);
+      }
+    });
+
+    it('should handle safe FTS index drop with fallback', async () => {
+      testDbPath = generateUniqueDbPath('safe-drop-fts');
+      const debugLogger = new ConsoleLogger('debug');
+      
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        3 // Very low threshold
+      );
+      
+      await manager.initialize();
+
+      try {
+        // Create minimal entities
+        await manager.createEntities([
+          {
+            name: 'safe-drop-1',
+            entityType: 'test',
+            observations: ['test 1'],
+            createdAt: new Date().toISOString()
+          },
+          {
+            name: 'safe-drop-2',
+            entityType: 'test',
+            observations: ['test 2'],
+            createdAt: new Date().toISOString()
+          },
+          {
+            name: 'safe-drop-3',
+            entityType: 'test',
+            observations: ['test 3'],
+            createdAt: new Date().toISOString()
+          },
+          {
+            name: 'safe-drop-4',
+            entityType: 'test',
+            observations: ['test 4'],
+            createdAt: new Date().toISOString()
+          }
+        ]);
+        
+        // Trigger FTS rebuild
+        await new Promise(resolve => setTimeout(resolve, 6000));
+        
+        // Delete should work even with FTS active
+        await manager.deleteEntities(['safe-drop-1']);
+        
+        // Verify operation succeeded
+        const result = await manager.readGraph();
+        expect(result.entities).toHaveLength(3);
+        expect(result.entities.find(e => e.name === 'safe-drop-1')).toBeUndefined();
+      } finally {
+        await safeCloseManager(manager);
+        await cleanupTestDb(testDbPath);
+      }
+    });
+
+    it('should recover from corrupted FTS state', async () => {
+      testDbPath = generateUniqueDbPath('corrupted-fts');
+      const debugLogger = new ConsoleLogger('debug');
+      
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        5
+      );
+      
+      await manager.initialize();
+
+      try {
+        // Create test data
+        const entities = [];
+        for (let i = 1; i <= 10; i++) {
+          entities.push({
+            name: `corrupt-test-${i}`,
+            entityType: 'test',
+            observations: [`data ${i}`],
+            createdAt: new Date().toISOString()
+          });
+        }
+        await manager.createEntities(entities);
+        
+        // Simulate rapid operations that might corrupt FTS state
+        const operations = [];
+        for (let i = 1; i <= 5; i++) {
+          operations.push(
+            manager.deleteEntities([`corrupt-test-${i}`]).catch(() => {})
+          );
+          operations.push(
+            manager.searchNodes('data').catch(() => {})
+          );
+        }
+        
+        await Promise.allSettled(operations);
+        
+        // Wait for queue to clear and operations to complete
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // System should recover and be functional
+        const result = await manager.readGraph();
+        expect(result).toBeDefined();
+        
+        // Should be able to perform new operations
+        await manager.createEntities([
+          {
+            name: 'post-recovery',
+            entityType: 'test',
+            observations: ['recovered'],
+            createdAt: new Date().toISOString()
+          }
+        ]);
+        
+        // Log entity creation for debugging
+        if (process.env.DEBUG) {
+          console.log('Created post-recovery entity');
+        }
+        
+        // Option 1: Manually trigger FTS rebuild to ensure indexes are up-to-date
+        // This is more reliable than waiting for the debounce timer
+        await manager.rebuildFTSIndexes();
+        
+        // Option 2: Additionally wait a bit for any async operations to complete
+        await new Promise(resolve => setTimeout(resolve, 100))
+        
+        // Now search should work immediately since we manually rebuilt FTS
+        let searchResult = await manager.searchNodes('post-recovery');
+        let foundEntity = searchResult.entities.find(e => e.name === 'post-recovery');
+        
+        // If initial search fails, implement retry with exponential backoff as fallback
+        if (!foundEntity) {
+          const maxRetries = 3;
+          
+          for (let i = 0; i < maxRetries; i++) {
+            // Wait progressively longer: 500ms, 1000ms, 1500ms
+            await new Promise(resolve => setTimeout(resolve, 500 * (i + 1)));
+            
+            // Try searching by entity name
+            searchResult = await manager.searchNodes('post-recovery');
+            foundEntity = searchResult.entities.find(e => e.name === 'post-recovery');
+            
+            // Log for debugging (only if DEBUG is set)
+            if (process.env.DEBUG) {
+              console.log(`Retry attempt ${i + 1}/${maxRetries}: found ${searchResult.entities.length} entities`);
+              if (foundEntity) {
+                console.log('Found entity:', foundEntity.name);
+              }
+            }
+            
+            if (foundEntity) break;
+            
+            // On last retry, also try searching by observation content as fallback
+            if (i === maxRetries - 1) {
+              searchResult = await manager.searchNodes('recovered');
+              foundEntity = searchResult.entities.find(e => e.name === 'post-recovery');
+              
+              if (process.env.DEBUG && !foundEntity) {
+                console.log('Final fallback search also failed. All entities:', 
+                  searchResult.entities.map(e => e.name));
+              }
+            }
+          }
+        }
+        
+        expect(foundEntity).toBeDefined();
+        if (foundEntity) {
+          expect(foundEntity.observations).toContain('recovered');
+        }
+      } finally {
+        await safeCloseManager(manager);
+        await cleanupTestDb(testDbPath);
+      }
+    });
+  });
+
   describe('Observation New Table Specific Tests', () => {
     it('should never reference observations_new table during operations', async () => {
       // Setup standalone manager with debug logging
@@ -792,6 +1145,92 @@ describe('Observations New Error Fix Test Suite', () => {
         // If we got here without errors, the fix is working
         const result = await manager.readGraph();
         expect(result).toBeDefined();
+      } finally {
+        await safeCloseManager(manager);
+        await cleanupTestDb(testDbPath);
+      }
+    });
+
+    it('should handle complex migration scenario with multiple restarts', async () => {
+      testDbPath = generateUniqueDbPath('complex-migration');
+      const debugLogger = new ConsoleLogger('debug');
+      
+      // First session: Create initial data
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        5
+      );
+      await manager.initialize();
+      
+      // Create entities with observations
+      const initialEntities = [];
+      for (let i = 1; i <= 8; i++) {
+        initialEntities.push({
+          name: `complex-${i}`,
+          entityType: 'test',
+          observations: [`obs ${i}`, `data ${i}`],
+          createdAt: new Date().toISOString()
+        });
+      }
+      await manager.createEntities(initialEntities);
+      await manager.close();
+      
+      // Second session: Simulate interrupted migration
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        5
+      );
+      await manager.initialize();
+      
+      // Start operations and close quickly (simulating interruption)
+      manager.createEntities([
+        {
+          name: 'interrupt-entity',
+          entityType: 'test',
+          observations: ['interrupted'],
+          createdAt: new Date().toISOString()
+        }
+      ]).catch(() => {}); // Don't await, simulate interruption
+      
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await manager.close();
+      
+      // Third session: Recovery and normal operations
+      manager = new DuckDBKnowledgeGraphManager(
+        () => testDbPath,
+        debugLogger,
+        false,
+        5
+      );
+      await manager.initialize();
+      
+      try {
+        // Should be able to delete without observations_new error
+        await manager.deleteEntities(['complex-1', 'complex-2']);
+        
+        // Should be able to search
+        const searchResult = await manager.searchNodes('data');
+        expect(searchResult.entities.length).toBeGreaterThan(0);
+        
+        // Should be able to create new entities
+        await manager.createEntities([
+          {
+            name: 'post-migration',
+            entityType: 'test',
+            observations: ['successfully migrated'],
+            createdAt: new Date().toISOString()
+          }
+        ]);
+        
+        // Final verification
+        const result = await manager.readGraph();
+        expect(result.entities.find(e => e.name === 'complex-1')).toBeUndefined();
+        expect(result.entities.find(e => e.name === 'complex-2')).toBeUndefined();
+        expect(result.entities.find(e => e.name === 'post-migration')).toBeDefined();
       } finally {
         await safeCloseManager(manager);
         await cleanupTestDb(testDbPath);

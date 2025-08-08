@@ -118,15 +118,52 @@ src/
   - FTS Debounce 自動重建機制（5 秒延遲）
   - 資料變更後自動觸發索引更新
   - 智慧跳過機制（FTS 未啟用或實體數量不足時）
+- **FTS 清理機制**：
+  - 啟動時自動清理孤立的 FTS 引用
+  - 智慧檢測並移除遷移過程中產生的殘留索引
+  - 支援手動修復功能（repair-database 工具）
+  - 處理 DuckDB FTS 靜態表引用問題
 - **API 支援**：
   - `rebuildFTSIndexes()`：手動重建 FTS 索引
   - `checkFTSIndexHealth()`：檢查索引健康狀態
   - `getFTSInfo()`：查詢 FTS 配置和統計資訊
+  - `cleanupStaleFTSReferences()`：清理孤立的 FTS 引用
 
 ### 錯誤處理
 - 使用 Zod 進行輸入驗證
 - 自訂錯誤類型（如 MCPError）
 - 適當的錯誤日誌記錄（使用 logger.ts）
+
+### 資料庫遷移與 FTS 管理
+- **遷移流程**：
+  1. 啟動時檢查資料庫版本和結構
+  2. 自動清理遷移殘留檔案（`*_new`, `*_backup`, `*_temp` 表）
+  3. 清除孤立的 FTS 索引和 schemas
+  4. 執行必要的結構更新
+  5. 重建 FTS 索引確保正確引用
+- **FTS 索引管理特點**：
+  - DuckDB FTS 使用靜態表引用，不會自動跟隨表重命名
+  - 索引存儲在獨立 schema 中（格式：`fts_{schema}_{table}`）
+  - 遷移前必須刪除舊索引，遷移後重建新索引
+  - 系統會自動檢測並清理 `observations_new` 等臨時表的 FTS 殘留
+
+### 故障排除與修復
+- **常見 FTS 錯誤**：
+  - `Table with name observations_new does not exist`：遷移後 FTS 索引仍引用舊表
+  - 解決方法：系統會自動在啟動時清理，或使用 repair-database 工具
+- **手動修復工具**：
+  ```bash
+  # 執行資料庫修復（清理殘留資源）
+  pnpm repair-database
+  
+  # 或透過程式碼直接呼叫
+  node -e "require('./dist/tools/repair-database.js').main()"
+  ```
+- **除錯模式**：
+  ```bash
+  # 啟用詳細 FTS 除錯日誌
+  DEBUG=1 pnpm start
+  ```
 
 ## Git Commit 規範
 
