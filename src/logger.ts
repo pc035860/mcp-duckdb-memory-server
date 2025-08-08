@@ -74,6 +74,9 @@ export interface Logger {
 // コンソールロガー（デフォルト実装として）
 export class ConsoleLogger implements Logger {
   private level: LogLevel = LogLevel.INFO;
+  private prefix(): string {
+    return new Date().toISOString();
+  }
 
   setLevel(level: LogLevel): void {
     this.level = level;
@@ -81,25 +84,41 @@ export class ConsoleLogger implements Logger {
 
   debug(message: string, payload?: Record<string, unknown>): void {
     if (this.shouldLog(LogLevel.DEBUG)) {
-      console.debug(message, payload);
+      if (payload !== undefined) {
+        console.debug(`[${this.prefix()}] ${message}`, payload);
+      } else {
+        console.debug(`[${this.prefix()}] ${message}`);
+      }
     }
   }
 
   info(message: string, payload?: Record<string, unknown>): void {
     if (this.shouldLog(LogLevel.INFO)) {
-      console.info(message, payload);
+      if (payload !== undefined) {
+        console.info(`[${this.prefix()}] ${message}`, payload);
+      } else {
+        console.info(`[${this.prefix()}] ${message}`);
+      }
     }
   }
 
   warn(message: string, payload?: Record<string, unknown>): void {
     if (this.shouldLog(LogLevel.WARN)) {
-      console.warn(message, payload);
+      if (payload !== undefined) {
+        console.warn(`[${this.prefix()}] ${message}`, payload);
+      } else {
+        console.warn(`[${this.prefix()}] ${message}`);
+      }
     }
   }
 
   error(message: string, payload?: Record<string, unknown>): void {
     if (this.shouldLog(LogLevel.ERROR)) {
-      console.error(message, payload);
+      if (payload !== undefined) {
+        console.error(`[${this.prefix()}] ${message}`, payload);
+      } else {
+        console.error(`[${this.prefix()}] ${message}`);
+      }
     }
   }
 

@@ -268,13 +268,25 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       // Check for orphaned sequences
       try {
-        const sequencesResult = await this.connection.runAndReadAll(`
-          SELECT sequence_name 
-          FROM information_schema.sequences 
-          WHERE sequence_schema = 'main' 
-          AND sequence_name LIKE '%_temp%'
-        `);
-        
+        // Prefer DuckDB's native system function, fallback to PG compatibility view
+        let sequencesResult;
+        try {
+          sequencesResult = await this.connection.runAndReadAll(`
+            SELECT sequence_name 
+            FROM duckdb_sequences()
+            WHERE schema_name = 'main' 
+              AND sequence_name LIKE '%_temp%'
+          `);
+        } catch (duckdbSeqErr) {
+          // Fallback to pg_catalog for environments where duckdb_sequences() is unavailable
+          sequencesResult = await this.connection.runAndReadAll(`
+            SELECT sequencename AS sequence_name
+            FROM pg_catalog.pg_sequences 
+            WHERE schemaname = 'main' 
+              AND sequencename LIKE '%_temp%'
+          `);
+        }
+
         const orphanedSequences = sequencesResult.getRows();
         for (const row of orphanedSequences) {
           const seqName = row[0] as string;
