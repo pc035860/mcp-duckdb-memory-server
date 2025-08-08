@@ -1,0 +1,21 @@
+---
+alwaysApply: true
+description: DuckDB 合併工具安全與資料一致性原則
+---
+### 安全原則
+
+- 輸入驗證：來源 DB 路徑、schema 與版本需檢查與白名單
+- 禁用任意 SQL；使用參數化查詢與固定語句模板
+- 資料夾穿越防護：正規化路徑並限制於工作根目錄
+- 觀察與稽核：必要的操作記錄與錯誤報告
+
+### 一致性與恢復
+
+- 先驗檢查：在合併前驗證 schema 差異、索引/約束狀態
+- 交易邊界：將邏輯分批交易化；支援中斷恢復
+- 檢查點：遵循 [`docs/duckdb-merge-best-practices.md`](mdc:docs/duckdb-merge-best-practices.md)
+
+### 測試參考
+
+- 請對齊：[`tests/merge-tool-security.test.ts`](mdc:tests/merge-tool-security.test.ts)、[`tests/merge-duckdb-integration.test.ts`](mdc:tests/merge-duckdb-integration.test.ts)
+

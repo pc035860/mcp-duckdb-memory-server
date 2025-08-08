@@ -1,0 +1,21 @@
+---
+alwaysApply: true
+description: 測試結構、啟動與常見測試檔導覽
+---
+### 測試與啟動
+
+- 測試框架：Vitest；設定於 [`vitest.config.ts`](mdc:vitest.config.ts)、[`tests/setup.ts`](mdc:tests/setup.ts)
+- 常見測試入口：`tests/*.test.ts`；整合驗證位於 `tests/validation/*`
+
+### 重要測試檔案索引
+
+- 併發控制：[`tests/concurrency-control.test.ts`](mdc:tests/concurrency-control.test.ts)、[`tests/concurrency-integration.test.ts`](mdc:tests/concurrency-integration.test.ts)
+- DuckDB 合併：[`tests/merge-duckdb*.test.ts`](mdc:tests/merge-duckdb.test.ts)
+- 安全性（合併工具）：[`tests/merge-tool-security.test.ts`](mdc:tests/merge-tool-security.test.ts)
+- FTS 與時間範圍：[`tests/hybrid-search.test.ts`](mdc:tests/hybrid-search.test.ts)、[`tests/ipc-time-range.test.ts`](mdc:tests/ipc-time-range.test.ts)
+
+### 執行建議
+
+- 單一測試檔：以測試名稱或檔案過濾
+- 慢測：優先檢查 DB I/O、鎖、與序列化成本
+
