@@ -1129,17 +1129,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         // Clear entity count cache after successful entity deletion
         this.clearEntityCountCache();
 
-        // Rebuild FTS indexes immediately to avoid search gaps
+        // Trigger an immediate, non-blocking FTS rebuild to avoid search gaps
+        // Do NOT await here to prevent deadlock with concurrency controller
         if (this.ftsEnabled && !this.concurrencyController.isOperationInProgress('migration')) {
-          try {
-            await this.rebuildFTSIndexes();
-            this.logger.info("FTS indexes rebuilt immediately after entity deletion");
-          } catch (immediateRebuildError) {
-            this.logger.warn("Immediate FTS rebuild failed after deletion, scheduling fallback", extractError(immediateRebuildError));
-            await this.scheduleIndexRebuild();
-          }
+          setTimeout(() => {
+            this.rebuildFTSIndexes().catch((immediateRebuildError) => {
+              this.logger.warn("Immediate FTS rebuild failed after deletion, will rely on scheduled rebuild", extractError(immediateRebuildError));
+              // Fallback: schedule a debounced rebuild
+              this.scheduleIndexRebuild().catch(() => {/* ignore */});
+            });
+          }, 0);
         } else {
-          await this.scheduleIndexRebuild();
+          // Fallback: schedule a debounced rebuild
+          this.scheduleIndexRebuild().catch(() => {/* ignore */});
         }
       } catch (error: unknown) {
         this.logger.error("Error deleting entities", extractError(error));
