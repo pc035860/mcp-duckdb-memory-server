@@ -1279,8 +1279,64 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         };
       });
 
-      this.logger.debug(`Search completed: ${entities.length} entities, ${relations.length} relations`);
-      return { entities, relations };
+      // Apply output limiting if provided
+      const output = options?.output;
+
+      // Entity limiting
+      const maxEntities = output?.maxEntities && output.maxEntities > 0 ? output.maxEntities : undefined;
+      const limitedEntities = maxEntities ? entities.slice(0, maxEntities) : entities;
+
+      // Observations trimming (compact or explicitly exclude observations)
+      const includeObservations = output?.includeObservations ?? !output?.compact;
+      const maxObs = output?.maxObservationsPerEntity ?? undefined;
+      const snippetChars = output?.snippetChars ?? undefined;
+      const trimmedEntities = limitedEntities.map((e) => {
+        const total = e.observations?.length || 0;
+        if (!includeObservations) {
+          return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
+        }
+        if (!maxObs && !snippetChars) {
+          // Ensure observations is always an array for consistency
+          return { ...e, observations: e.observations || [], observationsCount: total };
+        }
+        const preview = (e.observations || [])
+          .slice(0, maxObs ?? total)
+          .map((t) => (snippetChars && typeof t === 'string' && t.length > snippetChars ? t.slice(0, snippetChars) : t));
+        const omitted = Math.max(0, total - (maxObs ?? total));
+        return { ...e, observations: preview, observationsCount: total, observationsPreview: preview, omittedObservations: omitted };
+      });
+
+      // Relations limiting per includeRelations setting
+      let finalRelations = relations;
+      const includeRelations = output?.includeRelations ?? 'subset';
+      if (includeRelations === 'none') {
+        finalRelations = [];
+      } else if (includeRelations === 'subset') {
+        const cap = output?.maxRelations ?? 200;
+        if (finalRelations.length > cap) {
+          finalRelations = finalRelations.slice(0, cap);
+          this.logger.debug(
+            `Relations capped for response: ${relations.length} -> ${finalRelations.length}`
+          );
+        }
+      } // 'all' keeps full relations
+
+      // Response size guard (approx char count) — soft indicator only
+      const approx = JSON.stringify({ entities: trimmedEntities, relations: finalRelations }).length;
+      const maxChars = output?.maxResponseChars ?? undefined;
+      const truncated = maxChars ? approx > maxChars : false;
+
+      this.logger.debug(
+        `Search completed: ${trimmedEntities.length} entities, ${finalRelations.length} relations${truncated ? ' (truncated)' : ''}`
+      );
+      return {
+        entities: trimmedEntities,
+        relations: finalRelations,
+        truncated,
+        omittedEntities: maxEntities ? Math.max(0, entities.length - trimmedEntities.length) : 0,
+        omittedRelations:
+          includeRelations === 'subset' ? Math.max(0, relations.length - finalRelations.length) : includeRelations === 'none' ? relations.length : 0,
+      };
     } catch (error) {
       this.logger.error("Error in searchNodes", extractError(error));
       throw error;
@@ -1349,8 +1405,60 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         };
       });
 
-      this.logger.debug(`Multi-keyword search completed: ${entities.length} entities, ${relations.length} relations`);
-      return { entities, relations };
+      // Apply output limiting if provided
+      const output = options?.output;
+
+      // Entity limiting
+      const maxEntities = output?.maxEntities && output.maxEntities > 0 ? output.maxEntities : undefined;
+      const limitedEntities = maxEntities ? entities.slice(0, maxEntities) : entities;
+
+      // Observations trimming
+      const includeObservations = output?.includeObservations ?? !output?.compact;
+      const maxObs = output?.maxObservationsPerEntity ?? undefined;
+      const snippetChars = output?.snippetChars ?? undefined;
+      const trimmedEntities = limitedEntities.map((e) => {
+        const total = e.observations?.length || 0;
+        if (!includeObservations) {
+          return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
+        }
+        if (!maxObs && !snippetChars) {
+          return { ...e, observationsCount: total };
+        }
+        const preview = (e.observations || [])
+          .slice(0, maxObs ?? total)
+          .map((t) => (snippetChars && typeof t === 'string' && t.length > snippetChars ? t.slice(0, snippetChars) : t));
+        const omitted = Math.max(0, total - (maxObs ?? total));
+        return { ...e, observations: preview, observationsCount: total, observationsPreview: preview, omittedObservations: omitted };
+      });
+
+      // Relations limiting
+      let finalRelations = relations;
+      const includeRelations = output?.includeRelations ?? 'subset';
+      if (includeRelations === 'none') {
+        finalRelations = [];
+      } else if (includeRelations === 'subset') {
+        const cap = output?.maxRelations ?? 200;
+        if (finalRelations.length > cap) {
+          finalRelations = finalRelations.slice(0, cap);
+          this.logger.debug(
+            `Relations capped for response: ${relations.length} -> ${finalRelations.length}`
+          );
+        }
+      }
+
+      const approx = JSON.stringify({ entities: trimmedEntities, relations: finalRelations }).length;
+      const maxChars = output?.maxResponseChars ?? undefined;
+      const truncated = maxChars ? approx > maxChars : false;
+
+      this.logger.debug(`Multi-keyword search completed: ${trimmedEntities.length} entities, ${finalRelations.length} relations${truncated ? ' (truncated)' : ''}`);
+      return {
+        entities: trimmedEntities,
+        relations: finalRelations,
+        truncated,
+        omittedEntities: maxEntities ? Math.max(0, entities.length - trimmedEntities.length) : 0,
+        omittedRelations:
+          includeRelations === 'subset' ? Math.max(0, relations.length - finalRelations.length) : includeRelations === 'none' ? relations.length : 0,
+      };
     } catch (error) {
       this.logger.error("Error in searchMultiKeywords", extractError(error));
       throw error;

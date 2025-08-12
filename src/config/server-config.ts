@@ -25,6 +25,68 @@ export interface ServerConfig {
   search: {
     entityCountThreshold: number;
   };
+  output?: {
+    compact: boolean;
+    includeObservations: boolean;
+    maxEntities: number;
+    maxObservationsPerEntity: number;
+    snippetChars: number;
+    includeRelations: 'none' | 'subset' | 'all';
+    maxRelations: number;
+    maxResponseChars: number;
+  };
+}
+
+/**
+ * Safe environment parsers
+ */
+function parseBooleanEnv(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (raw == null) return defaultValue;
+  const value = raw.trim().toLowerCase();
+  if (["true", "1", "yes", "y"].includes(value)) return true;
+  if (["false", "0", "no", "n"].includes(value)) return false;
+  // Fallback to default on unknown value
+  console.warn(`[server-config] Invalid boolean for ${name}='${raw}', using default=${defaultValue}`);
+  return defaultValue;
+}
+
+function parsePositiveIntEnv(
+  name: string,
+  defaultValue: number,
+  options?: { allowZero?: boolean }
+): number {
+  const raw = process.env[name];
+  if (raw == null) return defaultValue;
+  const parsed = parseInt(raw, 10);
+  if (Number.isNaN(parsed)) {
+    console.warn(`[server-config] Invalid integer for ${name}='${raw}', using default=${defaultValue}`);
+    return defaultValue;
+  }
+  if (options?.allowZero) {
+    if (parsed < 0) {
+      console.warn(`[server-config] Negative value for ${name}=${parsed}, using default=${defaultValue}`);
+      return defaultValue;
+    }
+    return parsed;
+  }
+  if (parsed <= 0) {
+    console.warn(`[server-config] Non-positive value for ${name}=${parsed}, using default=${defaultValue}`);
+    return defaultValue;
+  }
+  return parsed;
+}
+
+function parseIncludeRelationsEnv(
+  name: string,
+  defaultValue: 'none' | 'subset' | 'all'
+): 'none' | 'subset' | 'all' {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === '') return defaultValue;
+  const value = raw.trim().toLowerCase();
+  if (value === 'none' || value === 'subset' || value === 'all') return value;
+  console.warn(`[server-config] Invalid includeRelations for ${name}='${raw}', using default='${defaultValue}'`);
+  return defaultValue;
 }
 
 /**
@@ -44,11 +106,21 @@ export function getServerConfig(): ServerConfig {
       socketPath,
     },
     queue: {
-      maxSize: parseInt(process.env.QUEUE_MAX_SIZE || "100", 10),
-      timeoutMs: parseInt(process.env.QUEUE_TIMEOUT_MS || "30000", 10),
+      maxSize: parsePositiveIntEnv('QUEUE_MAX_SIZE', 100),
+      timeoutMs: parsePositiveIntEnv('QUEUE_TIMEOUT_MS', 30000),
     },
     search: {
-      entityCountThreshold: parseInt(process.env.ENTITY_COUNT_THRESHOLD || "1000", 10),
+      entityCountThreshold: parsePositiveIntEnv('ENTITY_COUNT_THRESHOLD', 1000, { allowZero: true }),
+    },
+    output: {
+      compact: parseBooleanEnv('OUTPUT_COMPACT', true),
+      includeObservations: parseBooleanEnv('OUTPUT_INCLUDE_OBSERVATIONS', false),
+      maxEntities: parsePositiveIntEnv('OUTPUT_MAX_ENTITIES', 20),
+      maxObservationsPerEntity: parsePositiveIntEnv('OUTPUT_MAX_OBS_PER_ENTITY', 3, { allowZero: true }),
+      snippetChars: parsePositiveIntEnv('OUTPUT_SNIPPET_CHARS', 280),
+      includeRelations: parseIncludeRelationsEnv('OUTPUT_INCLUDE_RELATIONS', 'subset'),
+      maxRelations: parsePositiveIntEnv('OUTPUT_MAX_RELATIONS', 200, { allowZero: true }),
+      maxResponseChars: parsePositiveIntEnv('RESPONSE_MAX_CHARS', 50000),
     },
   };
 }
@@ -151,6 +223,29 @@ export function validateServerConfig(config: ServerConfig): void {
 
   if (config.search.entityCountThreshold < 0) {
     throw new Error("Entity count threshold must be non-negative");
+  }
+
+  // Optional output validation
+  if (config.output) {
+    const o = config.output;
+    if (o.maxEntities != null && o.maxEntities <= 0) {
+      throw new Error("output.maxEntities must be positive if provided");
+    }
+    if (o.maxObservationsPerEntity != null && o.maxObservationsPerEntity < 0) {
+      throw new Error("output.maxObservationsPerEntity must be non-negative if provided");
+    }
+    if (o.snippetChars != null && o.snippetChars <= 0) {
+      throw new Error("output.snippetChars must be positive if provided");
+    }
+    if (o.maxRelations != null && o.maxRelations < 0) {
+      throw new Error("output.maxRelations must be non-negative if provided");
+    }
+    if (o.maxResponseChars != null && o.maxResponseChars <= 0) {
+      throw new Error("output.maxResponseChars must be positive if provided");
+    }
+    if (o.includeRelations != null && !["none", "subset", "all"].includes(o.includeRelations)) {
+      throw new Error("output.includeRelations must be one of 'none' | 'subset' | 'all'");
+    }
   }
 }
 

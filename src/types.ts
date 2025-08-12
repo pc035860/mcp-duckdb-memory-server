@@ -18,7 +18,12 @@ export const EntityObject = z.object({
     .describe("An array of observation contents associated with the entity"),
   createdAt: z.string().describe("ISO 8601 timestamp when the entity was created"),
 });
-export type Entity = z.infer<typeof EntityObject>;
+export type Entity = z.infer<typeof EntityObject> & {
+  // Optional summary fields for compact output
+  observationsCount?: number;
+  observationsPreview?: string[];
+  omittedObservations?: number;
+};
 
 /**
  * Relations define directed connections between entities.
@@ -58,6 +63,10 @@ export type Observation = z.infer<typeof ObservationObject> & {
 export type KnowledgeGraph = {
   entities: Entity[];
   relations: Relation[];
+  // Optional metadata for compact/truncated responses
+  omittedEntities?: number;
+  omittedRelations?: number;
+  truncated?: boolean;
 };
 
 /**
@@ -78,12 +87,27 @@ export type TimeRangeOptions = {
 };
 
 /**
+ * Output limiting options for controlling response size
+ */
+export type OutputLimitOptions = {
+  compact?: boolean; // If true, prefer minimal payload
+  includeObservations?: boolean; // If false, omit observations contents
+  maxEntities?: number;
+  maxObservationsPerEntity?: number;
+  snippetChars?: number;
+  includeRelations?: 'none' | 'subset' | 'all';
+  maxRelations?: number;
+  maxResponseChars?: number;
+};
+
+/**
  * Options for multi-keyword search
  */
 export type MultiKeywordSearchOptions = {
   mode?: 'OR' | 'AND';  // How to combine keywords, defaults to 'OR'
   scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
   timeRange?: TimeRangeOptions;  // Optional time range filtering
+  output?: OutputLimitOptions; // Optional output limiting options
 };
 
 /**
@@ -92,6 +116,7 @@ export type MultiKeywordSearchOptions = {
 export type SearchNodesOptions = {
   scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
   timeRange?: TimeRangeOptions;  // Optional time range filtering
+  output?: OutputLimitOptions; // Optional output limiting options
 };
 
 /**

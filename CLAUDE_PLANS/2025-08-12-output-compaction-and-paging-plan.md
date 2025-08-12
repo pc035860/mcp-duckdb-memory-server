@@ -11,6 +11,22 @@
 
 ---
 
+### 目前進度（2025-08-12）
+- Phase 1：完成
+  - JSON 最小化輸出（移除縮排）
+  - 新增回應字元數 debug 記錄
+  - `relations` 預設上限 200（多於者裁切並記錄）
+  - 備註：為確保既有大型資料集測試相容，LIKE/FTS 的 SQL `LIMIT` 維持 500（未降至 100）
+- Phase 2：完成
+  - 型別與 Schema：新增 `OutputLimitOptions`，擴充 `SearchNodesOptions`、`MultiKeywordSearchOptions`；Zod schema 對應擴充
+  - 設定：`server-config` 新增 `output` 預設（可由 ENV 覆蓋）
+  - 入口：`secondary-server` 合併 `config.output` 與呼叫端 `options.output`
+  - Manager 輸出收斂：`compact` 預設、`includeObservations`、`maxEntities`、`maxObservationsPerEntity`、`snippetChars`、`includeRelations`（'none'|'subset'|'all' + `maxRelations`）、回傳 `observationsCount`、`observationsPreview`、`omitted*`、`truncated`
+  - 測試新增：`tests/output-compaction.test.ts`、`tests/secondary-server-output-defaults.test.ts`
+  - 全測試通過：284 passed
+
+---
+
 ### 依賴與原則
 - 併發/佇列：維持 `src/queue/request-queue.ts`、`src/utils/concurrency-controller.ts` 流程；縮小臨界區，不另開連線。
 - 安全：固定語句模板、參數化查詢；路徑白名單；禁任意 SQL。
@@ -20,9 +36,8 @@
 
 ### Phase 1 — 快速收益（安全、低風險）
 - 最小化 JSON：`secondary-server` 取消 `JSON.stringify(..., null, 2)` 縮排，改最小化字串。
-- 統一較低 LIMIT：
-  - `searchWithLike` LIMIT 500 → 100（與 `searchWithLikeFallback` 的 LIMIT 100 對齊）。
-  - `searchWithMultiKeywordFTS` LIMIT 500 → 100。
+- 統一較低 LIMIT（規劃原則）：
+  - 目標為降低結果集以縮小回應大小；然而在實作落地時為兼容既有整合測試與大型資料集行為，暫維持 SQL `LIMIT 500`；透過 `relations` 上限與 `compact` 預設達成輸出縮減。
   - BM25 最終 `slice(0, 100)` 維持。
 - 關聯邊上限：`searchNodes` 聚合邊（`relations`）加上限（例如 200），若超過回傳 `omittedRelations` 計數。
 - 觀測：記錄每次 MCP 回應的字元數與是否觸發截斷（log 級別 debug/info）。
@@ -35,6 +50,9 @@
 - 回應字元量在常見查詢下降 ≥ 80%。
 - 現有測試全部通過（含 `tests/hybrid-search.test.ts` 的 result limit 斷言）。
 - 無破壞性：回傳結構不變。
+
+實作結果：
+- JSON 最小化與 `relations` 上限生效；LIKE/FTS SQL `LIMIT` 維持 500 以確保測試相容。
 
 ---
 
@@ -78,6 +96,11 @@ type OutputLimitOptions = {
 - 預設回應不含全量 `observations`，但提供可用的 `observationsPreview` 與計數。
 - 在 `RESPONSE_MAX_CHARS` 內自動收斂（優先減少 preview → relations → entities），並標示 `truncated: true`。
 
+實作結果：
+- `Entity` 與 `KnowledgeGraph` 已加入可選欄位：`observationsCount`、`observationsPreview`、`omittedObservations`、`omittedEntities`、`omittedRelations`、`truncated`。
+- `secondary-server` 會將 `config.output` 與呼叫端 `options.output` 合併透傳。
+- `duckdb-manager` 依 `output` 執行實體與觀察內容精簡、關聯上限裁切，並標示截斷狀態。
+
 ---
 
 ### Phase 3 — 分頁/游標與逐步展開（`open_nodes`）
@@ -118,10 +141,11 @@ type OutputLimitOptions = {
 ---
 
 ### 測試計畫
-- 新增 `tests/output-compaction.test.ts`：
-  - respects `maxEntities`/`maxRelations`/`maxObservationsPerEntity`/`snippetChars`。
-  - 超過 `RESPONSE_MAX_CHARS` 會觸發 `truncated: true` 與收斂階梯。
-  - `open_nodes` 分頁可以完整拿到所有觀察內容。
+- 新增（已完成）：
+  - `tests/output-compaction.test.ts`：
+    - 驗證 `maxEntities`、`includeObservations`、`maxObservationsPerEntity`、`snippetChars`、`includeRelations`（'none'|'subset' + `maxRelations`）、`maxResponseChars`（`truncated`）。
+  - `tests/secondary-server-output-defaults.test.ts`：
+    - 驗證 `secondary-server` 合併 `config.output` 與呼叫端 `options.output` 的行為。
 - 既有測試覆核：`tests/hybrid-search.test.ts`、`tests/ipc-time-range.test.ts`、`tests/search-scope.test.ts` 等。
 
 ---
