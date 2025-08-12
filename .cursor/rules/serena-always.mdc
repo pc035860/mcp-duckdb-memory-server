@@ -1,0 +1,14 @@
+---
+description: Serena 程式碼分析
+alwaysApply: true
+---
+
+# 程式碼分析用 Serena
+- 先確認已啟用 Serena 專案（必須）
+  - 目標專案根目錄：`/Users/pc035860/code/mcp-duckdb-memory-server`
+  - 若未啟用：執行 `activate_project` 並以專案根路徑作為參數
+  - 啟用後：執行 `check_onboarding_performed` 確認初始化完成
+- 程式碼分析時優先使用 Serena MCP 語義工具
+- 搜尋函數/類別 → `find_symbol`
+- 分析引用關係 → `find_referencing_symbols`
+- 了解架構結構 → `get_symbols_overview`
