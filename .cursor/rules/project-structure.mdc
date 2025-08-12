@@ -1,0 +1,34 @@
+---
+alwaysApply: true
+---
+### 專案結構導覽
+
+- 主要進入點：[`src/index.ts`](mdc:src/index.ts)
+- 伺服器與 IPC：
+  - 主伺服器：[`src/servers/main-server.ts`](mdc:src/servers/main-server.ts)
+  - 次伺服器：[`src/servers/secondary-server.ts`](mdc:src/servers/secondary-server.ts)
+  - IPC 協定：[`src/servers/ipc/protocol.ts`](mdc:src/servers/ipc/protocol.ts)
+  - Socket Client：[`src/servers/ipc/socket-client.ts`](mdc:src/servers/ipc/socket-client.ts)
+  - Socket Server：[`src/servers/ipc/socket-server.ts`](mdc:src/servers/ipc/socket-server.ts)
+- DuckDB 管理：
+  - 管理介面：[`src/managers/interface.ts`](mdc:src/managers/interface.ts)
+  - DuckDB 管理實作：[`src/managers/duckdb-manager.ts`](mdc:src/managers/duckdb-manager.ts)
+  - 代理管理：[`src/managers/proxy-manager.ts`](mdc:src/managers/proxy-manager.ts)
+- 佇列與併發控制：
+  - 請求佇列：[`src/queue/request-queue.ts`](mdc:src/queue/request-queue.ts)
+  - 併發控制：[`src/utils/concurrency-controller.ts`](mdc:src/utils/concurrency-controller.ts)
+  - 整體併發策略：[`docs/concurrency-control.md`](mdc:docs/concurrency-control.md)
+- 設定與工具：
+  - 伺服器設定：[`src/config/server-config.ts`](mdc:src/config/server-config.ts)
+  - 合併工具：[`src/tools/merge-duckdb.ts`](mdc:src/tools/merge-duckdb.ts)
+  - 遷移工具：[`src/tools/migrate-database.ts`](mdc:src/tools/migrate-database.ts)
+  - 修復工具：[`src/tools/repair-database.ts`](mdc:src/tools/repair-database.ts)
+- 日誌與共用型別：
+  - 日誌：[`src/logger.ts`](mdc:src/logger.ts)
+  - 共用型別：[`src/types.ts`](mdc:src/types.ts)
+
+### 啟動與測試
+
+- 測試設定：[`vitest.config.ts`](mdc:vitest.config.ts)、[`tests/setup.ts`](mdc:tests/setup.ts)
+- 範例與腳本：[`examples/start-servers.sh`](mdc:examples/start-servers.sh)、[`README.md`](mdc:README.md)
+

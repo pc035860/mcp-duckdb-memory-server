@@ -12,17 +12,24 @@
   "main": "index.js",
   "scripts": {
     "dev": "pnpm build && npx @modelcontextprotocol/inspector pnpm start",
-    "build": "tsup && shx chmod +x dist/index.mjs && shx chmod +x dist/tools/merge-duckdb.mjs",
+    "build": "tsup && shx chmod +x dist/index.mjs && shx chmod +x dist/tools/merge-duckdb.mjs && shx chmod +x dist/tools/repair-database.mjs && shx chmod +x dist/tools/migrate-database.mjs",
     "start": "node dist/index.mjs",
     "prepare": "npm run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "changeset:publish": "pnpm build && changeset publish",
-    "merge": "node dist/tools/merge-duckdb.mjs"
+    "merge": "node dist/tools/merge-duckdb.mjs",
+    "repair": "node dist/tools/repair-database.mjs",
+    "migrate": "node dist/tools/migrate-database.mjs",
+    "repair-database": "node dist/tools/repair-database.mjs",
+    "migrate-database": "tsx src/tools/migrate-database.ts",
+    "migrate:build": "tsc src/tools/migrate-database.ts --outDir dist/tools"
   },
   "bin": {
     "mcp-duckdb-memory-server": "dist/index.mjs",
-    "merge-duckdb": "dist/tools/merge-duckdb.mjs"
+    "merge-duckdb": "dist/tools/merge-duckdb.mjs",
+    "repair-database": "dist/tools/repair-database.mjs",
+    "migrate-database": "dist/tools/migrate-database.mjs"
   },
   "files": [
     "dist"

@@ -1,0 +1,23 @@
+---
+alwaysApply: true
+description: 併發與請求佇列設計原則
+---
+### 併發/佇列核心原則
+
+- 所有對 DuckDB 的突變操作必須經由請求佇列與併發控制
+- 不直接繞過 `request-queue` 或 `concurrency-controller` 與 DB 互動
+- IPC 請求需有明確的序列化與超時策略
+
+### 主要元件
+
+- 佇列：[`src/queue/request-queue.ts`](mdc:src/queue/request-queue.ts)
+- 併發控制：[`src/utils/concurrency-controller.ts`](mdc:src/utils/concurrency-controller.ts)
+- 文檔：[`docs/concurrency-control.md`](mdc:docs/concurrency-control.md)
+
+### 實作守則
+
+- 在熱路徑避免新建連線；複用連線/實例
+- 嚴格界定臨界區，縮小鎖持有時間
+- 明確區分讀/寫請求；寫請求優先級策略需可配置
+- 失敗可重試需具冪等與上限退避
+

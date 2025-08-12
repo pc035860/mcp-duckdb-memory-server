@@ -18,10 +18,67 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
   private client: IPCSocketClient;
   private logger: Logger;
   private initialized: boolean = false;
+  
+  // Operation queue for serializing critical operations
+  private operationQueue: Array<{
+    operation: () => Promise<any>;
+    resolve: (value: any) => void;
+    reject: (error: any) => void;
+  }> = [];
+  private processingQueue: boolean = false;
 
   constructor(socketPath: string, logger: Logger) {
     this.client = new IPCSocketClient(socketPath, logger);
     this.logger = logger;
+  }
+  
+  /**
+   * Execute operation with local concurrency control
+   * This ensures operations are serialized at the secondary server level
+   */
+  private async executeWithConcurrencyControl<T>(
+    operation: () => Promise<T>
+  ): Promise<T> {
+    return new Promise((resolve, reject) => {
+      // Add to operation queue
+      this.operationQueue.push({
+        operation,
+        resolve,
+        reject,
+      });
+      
+      // Start processing queue if not already processing
+      if (!this.processingQueue) {
+        this.processOperationQueue();
+      }
+    });
+  }
+  
+  /**
+   * Process operation queue sequentially
+   */
+  private async processOperationQueue(): Promise<void> {
+    if (this.processingQueue || this.operationQueue.length === 0) {
+      return;
+    }
+    
+    this.processingQueue = true;
+    this.logger.debug("Started processing proxy operation queue");
+    
+    while (this.operationQueue.length > 0) {
+      const item = this.operationQueue.shift()!;
+      
+      try {
+        const result = await item.operation();
+        item.resolve(result);
+      } catch (error) {
+        item.reject(error);
+        this.logger.error("Proxy operation failed", extractError(error));
+      }
+    }
+    
+    this.processingQueue = false;
+    this.logger.debug("Finished processing proxy operation queue");
   }
 
   /**
@@ -59,9 +116,12 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
    * Create entities
    */
   async createEntities(entities: Entity[]): Promise<Entity[]> {
-    return await this.client.sendRequest({
-      type: "create_entities",
-      payload: { entities },
+    // Use concurrency control for bulk write operations
+    return this.executeWithConcurrencyControl(async () => {
+      return await this.client.sendRequest({
+        type: "create_entities",
+        payload: { entities },
+      });
     });
   }
 
@@ -79,9 +139,12 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
    * Add observations to entities
    */
   async addObservations(observations: Array<Observation>): Promise<Observation[]> {
-    return await this.client.sendRequest({
-      type: "add_observations",
-      payload: { observations },
+    // Use concurrency control for bulk write operations
+    return this.executeWithConcurrencyControl(async () => {
+      return await this.client.sendRequest({
+        type: "add_observations",
+        payload: { observations },
+      });
     });
   }
 
@@ -89,9 +152,12 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
    * Delete entities
    */
   async deleteEntities(entityNames: string[]): Promise<void> {
-    await this.client.sendRequest({
-      type: "delete_entities",
-      payload: { entityNames },
+    // Use concurrency control for deletion operations
+    return this.executeWithConcurrencyControl(async () => {
+      await this.client.sendRequest({
+        type: "delete_entities",
+        payload: { entityNames },
+      });
     });
   }
 
@@ -162,9 +228,12 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
    * Rebuild FTS indexes for maintenance or after bulk data changes
    */
   async rebuildFTSIndexes(): Promise<void> {
-    await this.client.sendRequest({
-      type: "rebuild_fts_indexes",
-      payload: {},
+    // Use concurrency control for FTS rebuild operations
+    return this.executeWithConcurrencyControl(async () => {
+      await this.client.sendRequest({
+        type: "rebuild_fts_indexes",
+        payload: {},
+      });
     });
   }
 
