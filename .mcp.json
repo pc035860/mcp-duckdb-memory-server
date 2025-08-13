@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "serena": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/oraios/serena",
+        "serena-mcp-server",
+        "--context",
+        "ide-assistant",
+        "--project",
+        "/Users/pc035860/code/mcp-duckdb-memory-server",
+        "--mode",
+        "planning"
+      ],
+      "env": {}
+    }
+  }
+}

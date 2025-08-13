@@ -3,9 +3,6 @@ dist
 tmp
 docker-compose.yml
 
-.serena/
-.mcp.json
-
 tests/validation/report-*
 
 # Test databases and data files
@@ -33,3 +30,5 @@ scripts/
 # Migration test files
 test-migration-*.sh
 test-error-recovery.sh
+
+.serena/cache
