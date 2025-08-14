@@ -251,9 +251,10 @@ export class SecondaryServer {
       "Open specific nodes in the knowledge graph by their names",
       {
         names: z.array(z.string()).describe("An array of entity names to retrieve"),
+        includeObservations: z.boolean().optional().describe("Whether to include observations (default: true)"),
       },
-      async ({ names }) => {
-        const payload = await this.manager.openNodes(names);
+      async ({ names, includeObservations }) => {
+        const payload = await this.manager.openNodes(names, { includeObservations });
         const text = JSON.stringify(payload);
         this.logger.debug("MCP response size (open_nodes)", { chars: text.length });
         return {

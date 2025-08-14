@@ -120,6 +120,13 @@ export type SearchNodesOptions = {
 };
 
 /**
+ * Options for opening nodes
+ */
+export type OpenNodesOptions = {
+  includeObservations?: boolean; // Default: true, for backward compatibility
+};
+
+/**
  * The KnowledgeGraphManagerInterface is the primary interface for interacting with the knowledge graph
  */
 export type KnowledgeGraphManagerInterface = {
@@ -131,5 +138,5 @@ export type KnowledgeGraphManagerInterface = {
   deleteRelations(relations: Relation[]): Promise<void>;
   searchNodes(query: string, options?: SearchNodesOptions): Promise<KnowledgeGraph>;
   searchMultiKeywords(keywords: string[], options?: MultiKeywordSearchOptions): Promise<KnowledgeGraph>;
-  openNodes(names: string[]): Promise<KnowledgeGraph>;
+  openNodes(names: string[], options?: OpenNodesOptions): Promise<KnowledgeGraph>;
 };
