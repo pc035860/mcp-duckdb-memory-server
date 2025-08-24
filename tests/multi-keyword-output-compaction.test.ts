@@ -50,6 +50,18 @@ describe('MultiKeyword Output Compaction & Limits', () => {
     });
     expect(result.truncated).toBe(true);
   });
+
+  it('should return full observations when includeObservations=true and no max/snippet (multi-keyword)', async () => {
+    const result = await manager.searchMultiKeywords(['Entity'], {
+      output: { includeObservations: true, maxObservationsPerEntity: 0, snippetChars: 0 }
+    });
+    expect(result.entities.length).toBeGreaterThan(0);
+    const e0 = result.entities[0];
+    expect(Array.isArray(e0.observations)).toBe(true);
+    // full = all 5 observations
+    expect(e0.observations?.length).toBe(5);
+    expect(e0.observationsCount).toBe(5);
+  });
 });
 
 

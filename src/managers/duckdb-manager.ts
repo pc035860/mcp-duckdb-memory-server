@@ -1433,7 +1433,7 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
         }
         if (!maxObs && !snippetChars) {
-          return { ...e, observationsCount: total };
+          return { ...e, observations: e.observations || [], observationsCount: total };
         }
         const preview = (e.observations || [])
           .slice(0, maxObs ?? total)
