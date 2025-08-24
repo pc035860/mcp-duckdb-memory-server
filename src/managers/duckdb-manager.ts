@@ -16,6 +16,7 @@ import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
 import { extractError, convertTimestampToISOWithFallback } from "../utils";
 import { ConcurrencyController, OperationType } from "../utils/concurrency-controller";
+import { containsChinese } from "../utils/text-utils";
 
 /**
  * DuckDB implementation with persistent connection (no cleanup per operation)
@@ -1236,15 +1237,20 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       // Get entity count to determine search strategy
       const entityCount = await this.getCachedEntityCount();
-      this.logger.debug(`Entity count: ${entityCount}, choosing search strategy${scope ? ` with scope: ${scope}` : ''}`);
+      const hasChinese = containsChinese(query);
+      this.logger.debug(`Entity count: ${entityCount}, Chinese detected: ${hasChinese}, choosing search strategy${scope ? ` with scope: ${scope}` : ''}`);
       
-      // Choose search strategy based on dataset size
-      if (entityCount < this.entityCountThreshold) {
-        // Small dataset: use SQL LIKE search
-        this.logger.debug("Using LIKE search for small dataset");
+      // Choose search strategy based on dataset size and Chinese character detection
+      if (hasChinese || entityCount < this.entityCountThreshold) {
+        // Chinese text or small dataset: use SQL LIKE search
+        if (hasChinese) {
+          this.logger.debug("Using LIKE search due to Chinese character detection");
+        } else {
+          this.logger.debug("Using LIKE search for small dataset");
+        }
         entities = await this.searchWithLike(query, scope, options?.timeRange);
       } else {
-        // Large dataset: use FTS search
+        // Large dataset without Chinese: use FTS search
         this.logger.debug("Using FTS search for large dataset");
         entities = await this.searchWithFTS(query, scope, options?.timeRange);
       }
@@ -1373,15 +1379,20 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Use hybrid search strategy for better performance
       const entityCount = await this.getCachedEntityCount();
+      const hasChineseInKeywords = validKeywords.some(keyword => containsChinese(keyword));
       
       let entities: Entity[] = [];
       
-      if (entityCount < this.entityCountThreshold) {
-        // Small dataset: use SQL LIKE search with multiple keywords
-        this.logger.debug(`Using LIKE search for multi-keyword search${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+      if (hasChineseInKeywords || entityCount < this.entityCountThreshold) {
+        // Chinese text or small dataset: use SQL LIKE search with multiple keywords
+        if (hasChineseInKeywords) {
+          this.logger.debug(`Using LIKE search for multi-keyword search due to Chinese character detection${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+        } else {
+          this.logger.debug(`Using LIKE search for multi-keyword search (small dataset)${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+        }
         entities = await this.searchWithMultiKeywordLike(validKeywords, options);
       } else {
-        // Large dataset: use FTS search with multiple keywords
+        // Large dataset without Chinese: use FTS search with multiple keywords
         this.logger.debug(`Using FTS search for multi-keyword search${options?.scope ? ` with scope: ${options.scope}` : ''}`);
         entities = await this.searchWithMultiKeywordFTS(validKeywords, options);
       }
