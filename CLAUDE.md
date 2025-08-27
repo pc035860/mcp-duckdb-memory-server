@@ -226,9 +226,31 @@ DEBUG=1|true                  # 除錯模式（啟用詳細日誌和配置顯示
 # FTS 搜尋相關配置
 ENTITY_COUNT_THRESHOLD=1000   # 搜尋策略切換閾值（< 閾值用LIKE，≥ 閾值用FTS）
                              # 設為 0 則總是使用 FTS；設為很大值則偏好 LIKE
+
+# Output Compaction 預設（Phase 2/2.5）
+OUTPUT_COMPACT=true                    # 預設啟用 compact（僅索引級資料）
+OUTPUT_INCLUDE_OBSERVATIONS=false      # 預設不回傳 observations 內容
+OUTPUT_MAX_ENTITIES=20                 # 回傳的實體上限
+OUTPUT_MAX_OBS_PER_ENTITY=3            # 每實體 observations 上限（產生 preview）
+OUTPUT_SNIPPET_CHARS=280               # preview 每段的最大字元數
+OUTPUT_INCLUDE_RELATIONS=subset        # relations 回傳策略：none|subset|all
+OUTPUT_MAX_RELATIONS=200               # relations 上限（subset 時生效）
+RESPONSE_MAX_CHARS=50000               # 回應最大字元數守門員（觸發漸進式截斷）
 ```
+
+> 注意：上述 Output Compaction 相關環境變數僅影響「搜尋類工具」的輸出（`search_nodes`、`search_multi_keywords`）。`open_nodes` 不受這些環境變數影響，其 `includeObservations` 由工具參數控制，且為了向後相容預設值為 `true`。
 
 ### Claude Desktop 整合
 配置檔案位於 `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Main Server 配置使用環境變數
 - Secondary Server 配置需指定 IPC socket 路徑
+
+## Output Compaction 與 open_nodes 說明（Phase 2/2.5）
+
+- 預設 compact：`OUTPUT_COMPACT=true` 與 `OUTPUT_INCLUDE_OBSERVATIONS=false`，搜尋結果僅含索引級資料。
+- 觀察片段（preview）：`OUTPUT_MAX_OBS_PER_ENTITY` 與 `OUTPUT_SNIPPET_CHARS` 控制預覽段數與長度。
+- Relations 限縮：以 `OUTPUT_INCLUDE_RELATIONS` 與 `OUTPUT_MAX_RELATIONS` 控制返回的關聯數量。
+- 回應守門員：超過 `RESPONSE_MAX_CHARS` 會進行漸進式截斷（先移除 observations 內容、再限縮 relations、最後限縮 entities），並標記 `truncated: true`。
+- 開啟完整觀察：
+  - 以工具 `open_nodes` 並設定 `includeObservations=true` 取得完整觀察內容（預設即為 true，相容舊版）。
+  - 搜尋時也可透過 `options.output.includeObservations=true` 覆寫預設。

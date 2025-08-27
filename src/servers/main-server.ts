@@ -197,7 +197,7 @@ export class MainServer {
       }
 
       if (isOpenNodesRequest(request)) {
-        return await this.manager.openNodes(request.payload.names);
+        return await this.manager.openNodes(request.payload.names, request.payload.options);
       }
 
       if (isReadGraphRequest(request)) {

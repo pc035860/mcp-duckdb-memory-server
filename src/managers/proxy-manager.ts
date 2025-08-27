@@ -207,10 +207,10 @@ export class ProxyKnowledgeGraphManager implements KnowledgeGraphManagerInterfac
   /**
    * Get entities by name
    */
-  async openNodes(names: string[]): Promise<KnowledgeGraph> {
+  async openNodes(names: string[], options?: import('../types').OpenNodesOptions): Promise<KnowledgeGraph> {
     return await this.client.sendRequest({
       type: "open_nodes",
-      payload: { names },
+      payload: { names, options },
     });
   }
 

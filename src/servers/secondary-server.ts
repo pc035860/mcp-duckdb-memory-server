@@ -48,18 +48,19 @@ export class SecondaryServer {
       {
         entities: z.array(EntityObject),
       },
-      async ({ entities }) => ({
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              await this.manager.createEntities(entities),
-              null,
-              2
-            ),
-          },
-        ],
-      })
+      async ({ entities }) => {
+        const payload = await this.manager.createEntities(entities);
+        const text = JSON.stringify(payload);
+        this.logger.debug("MCP response size (create_entities)", { chars: text.length });
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+        };
+      }
     );
 
     // Create relations tool
@@ -69,18 +70,19 @@ export class SecondaryServer {
       {
         relations: z.array(RelationObject),
       },
-      async ({ relations }) => ({
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              await this.manager.createRelations(relations),
-              null,
-              2
-            ),
-          },
-        ],
-      })
+      async ({ relations }) => {
+        const payload = await this.manager.createRelations(relations);
+        const text = JSON.stringify(payload);
+        this.logger.debug("MCP response size (create_relations)", { chars: text.length });
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+        };
+      }
     );
 
     // Add observations tool
@@ -90,18 +92,19 @@ export class SecondaryServer {
       {
         observations: z.array(ObservationObject),
       },
-      async ({ observations }) => ({
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              await this.manager.addObservations(observations),
-              null,
-              2
-            ),
-          },
-        ],
-      })
+      async ({ observations }) => {
+        const payload = await this.manager.addObservations(observations);
+        const text = JSON.stringify(payload);
+        this.logger.debug("MCP response size (add_observations)", { chars: text.length });
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+        };
+      }
     );
 
     // Delete entities tool
@@ -186,18 +189,26 @@ export class SecondaryServer {
           .optional()
           .describe("Search options including scope and time range filtering"),
       },
-      async ({ query, options }) => ({
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              await this.manager.searchNodes(query, options),
-              null,
-              2
-            ),
+      async ({ query, options }) => {
+        const mergedOptions = {
+          ...options,
+          output: {
+            ...(this.config.output || {}),
+            ...(options?.output || {}),
           },
-        ],
-      })
+        } as any;
+        const payload = await this.manager.searchNodes(query, mergedOptions);
+        const text = JSON.stringify(payload);
+        this.logger.debug("MCP response size (search_nodes)", { chars: text.length });
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+        };
+      }
     );
 
     // Search multi keywords tool
@@ -212,18 +223,26 @@ export class SecondaryServer {
           .optional()
           .describe("Search options including mode, scope and time range filtering"),
       },
-      async ({ keywords, options }) => ({
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              await this.manager.searchMultiKeywords(keywords, options),
-              null,
-              2
-            ),
+      async ({ keywords, options }) => {
+        const mergedOptions = {
+          ...options,
+          output: {
+            ...(this.config.output || {}),
+            ...(options?.output || {}),
           },
-        ],
-      })
+        } as any;
+        const payload = await this.manager.searchMultiKeywords(keywords, mergedOptions);
+        const text = JSON.stringify(payload);
+        this.logger.debug("MCP response size (search_multi_keywords)", { chars: text.length });
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+        };
+      }
     );
 
     // Open nodes tool
@@ -232,19 +251,21 @@ export class SecondaryServer {
       "Open specific nodes in the knowledge graph by their names",
       {
         names: z.array(z.string()).describe("An array of entity names to retrieve"),
+        includeObservations: z.boolean().optional().describe("Whether to include observations (default: true)"),
       },
-      async ({ names }) => ({
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              await this.manager.openNodes(names),
-              null,
-              2
-            ),
-          },
-        ],
-      })
+      async ({ names, includeObservations }) => {
+        const payload = await this.manager.openNodes(names, { includeObservations });
+        const text = JSON.stringify(payload);
+        this.logger.debug("MCP response size (open_nodes)", { chars: text.length });
+        return {
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+        };
+      }
     );
 
     // Manual checkpoint tool

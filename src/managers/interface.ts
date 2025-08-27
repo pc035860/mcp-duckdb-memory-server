@@ -5,6 +5,7 @@ import {
   KnowledgeGraph,
   MultiKeywordSearchOptions,
   SearchNodesOptions,
+  OpenNodesOptions,
 } from "../types";
 
 /**
@@ -72,9 +73,10 @@ export interface KnowledgeGraphManagerInterface {
   /**
    * Get entities by name
    * @param names Array of entity names
+   * @param options Optional options for opening nodes
    * @returns Knowledge graph with matching entities and their relations
    */
-  openNodes(names: string[]): Promise<KnowledgeGraph>;
+  openNodes(names: string[], options?: OpenNodesOptions): Promise<KnowledgeGraph>;
 
   /**
    * Read the entire knowledge graph

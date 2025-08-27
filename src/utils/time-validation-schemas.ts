@@ -62,6 +62,20 @@ export const SearchNodesOptionsSchema = z.object({
   timeRange: TimeRangeOptionsSchema
     .optional()
     .describe("Optional time range filtering options")
+  ,
+  output: z
+    .object({
+      compact: z.boolean().optional(),
+      includeObservations: z.boolean().optional(),
+      maxEntities: z.number().int().positive().optional(),
+      maxObservationsPerEntity: z.number().int().nonnegative().optional(),
+      snippetChars: z.number().int().positive().optional(),
+      includeRelations: z.enum(['none','subset','all']).optional(),
+      maxRelations: z.number().int().nonnegative().optional(),
+      maxResponseChars: z.number().int().positive().optional(),
+    })
+    .optional()
+    .describe("Output limiting options to control response size")
 });
 
 /**
@@ -78,5 +92,18 @@ export const MultiKeywordSearchOptionsSchema = z.object({
     .describe("Optional scope to filter entities, e.g., 'project' or '[project]'"),
   timeRange: TimeRangeOptionsSchema
     .optional()
-    .describe("Optional time range filtering options")
+    .describe("Optional time range filtering options"),
+  output: z
+    .object({
+      compact: z.boolean().optional(),
+      includeObservations: z.boolean().optional(),
+      maxEntities: z.number().int().positive().optional(),
+      maxObservationsPerEntity: z.number().int().nonnegative().optional(),
+      snippetChars: z.number().int().positive().optional(),
+      includeRelations: z.enum(['none','subset','all']).optional(),
+      maxRelations: z.number().int().nonnegative().optional(),
+      maxResponseChars: z.number().int().positive().optional(),
+    })
+    .optional()
+    .describe("Output limiting options to control response size")
 });

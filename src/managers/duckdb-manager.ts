@@ -7,6 +7,7 @@ import {
   SearchNodesOptions,
   TimeRangeOptions,
   DatabaseRow,
+  OpenNodesOptions,
 } from "../types";
 import { KnowledgeGraphManagerInterface } from "./interface";
 import { Logger, ConsoleLogger } from "../logger";
@@ -15,6 +16,7 @@ import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
 import { extractError, convertTimestampToISOWithFallback } from "../utils";
 import { ConcurrencyController, OperationType } from "../utils/concurrency-controller";
+import { containsChinese } from "../utils/text-utils";
 
 /**
  * DuckDB implementation with persistent connection (no cleanup per operation)
@@ -1235,15 +1237,20 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       // Get entity count to determine search strategy
       const entityCount = await this.getCachedEntityCount();
-      this.logger.debug(`Entity count: ${entityCount}, choosing search strategy${scope ? ` with scope: ${scope}` : ''}`);
+      const hasChinese = containsChinese(query);
+      this.logger.debug(`Entity count: ${entityCount}, Chinese detected: ${hasChinese}, choosing search strategy${scope ? ` with scope: ${scope}` : ''}`);
       
-      // Choose search strategy based on dataset size
-      if (entityCount < this.entityCountThreshold) {
-        // Small dataset: use SQL LIKE search
-        this.logger.debug("Using LIKE search for small dataset");
+      // Choose search strategy based on dataset size and Chinese character detection
+      if (hasChinese || entityCount < this.entityCountThreshold) {
+        // Chinese text or small dataset: use SQL LIKE search
+        if (hasChinese) {
+          this.logger.debug("Using LIKE search due to Chinese character detection");
+        } else {
+          this.logger.debug("Using LIKE search for small dataset");
+        }
         entities = await this.searchWithLike(query, scope, options?.timeRange);
       } else {
-        // Large dataset: use FTS search
+        // Large dataset without Chinese: use FTS search
         this.logger.debug("Using FTS search for large dataset");
         entities = await this.searchWithFTS(query, scope, options?.timeRange);
       }
@@ -1279,8 +1286,74 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         };
       });
 
-      this.logger.debug(`Search completed: ${entities.length} entities, ${relations.length} relations`);
-      return { entities, relations };
+      // Apply output limiting if provided
+      const output = options?.output;
+
+      // Entity limiting
+      const maxEntities = output?.maxEntities && output.maxEntities > 0 ? output.maxEntities : undefined;
+      const limitedEntities = maxEntities ? entities.slice(0, maxEntities) : entities;
+
+      // Observations trimming (compact or explicitly exclude observations)
+      const includeObservations = output?.includeObservations ?? !output?.compact;
+      const maxObs = output?.maxObservationsPerEntity ?? undefined;
+      const snippetChars = output?.snippetChars ?? undefined;
+      const trimmedEntities = limitedEntities.map((e) => {
+        const total = e.observations?.length || 0;
+        if (!includeObservations) {
+          return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
+        }
+        if (!maxObs && !snippetChars) {
+          // Ensure observations is always an array for consistency
+          return { ...e, observations: e.observations || [], observationsCount: total };
+        }
+        const preview = (e.observations || [])
+          .slice(0, maxObs ?? total)
+          .map((t) => (snippetChars && typeof t === 'string' && t.length > snippetChars ? t.slice(0, snippetChars) : t));
+        const omitted = Math.max(0, total - (maxObs ?? total));
+        return { ...e, observations: preview, observationsCount: total, observationsPreview: preview, omittedObservations: omitted };
+      });
+
+      // Relations limiting per includeRelations setting
+      let finalRelations = relations;
+      const includeRelations = output?.includeRelations ?? 'subset';
+      if (includeRelations === 'none') {
+        finalRelations = [];
+      } else if (includeRelations === 'subset') {
+        const cap = output?.maxRelations ?? 200;
+        if (finalRelations.length > cap) {
+          finalRelations = finalRelations.slice(0, cap);
+          this.logger.debug(
+            `Relations capped for response: ${relations.length} -> ${finalRelations.length}`
+          );
+        }
+      } // 'all' keeps full relations
+
+      // Apply progressive truncation if maxResponseChars limit is exceeded
+      const maxChars = output?.maxResponseChars ?? undefined;
+      let { 
+        finalEntities, 
+        finalRelations: truncatedRelations, 
+        wasTruncated,
+        finalOmittedEntities,
+        finalOmittedRelations 
+      } = this.applyProgressiveTruncation(
+        trimmedEntities, 
+        finalRelations, 
+        maxChars,
+        entities.length - trimmedEntities.length,
+        includeRelations === 'subset' ? Math.max(0, relations.length - finalRelations.length) : includeRelations === 'none' ? relations.length : 0
+      );
+
+      this.logger.debug(
+        `Search completed: ${finalEntities.length} entities, ${truncatedRelations.length} relations${wasTruncated ? ' (truncated)' : ''}`
+      );
+      return {
+        entities: finalEntities,
+        relations: truncatedRelations,
+        truncated: wasTruncated,
+        omittedEntities: finalOmittedEntities,
+        omittedRelations: finalOmittedRelations,
+      };
     } catch (error) {
       this.logger.error("Error in searchNodes", extractError(error));
       throw error;
@@ -1306,15 +1379,20 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Use hybrid search strategy for better performance
       const entityCount = await this.getCachedEntityCount();
+      const hasChineseInKeywords = validKeywords.some(keyword => containsChinese(keyword));
       
       let entities: Entity[] = [];
       
-      if (entityCount < this.entityCountThreshold) {
-        // Small dataset: use SQL LIKE search with multiple keywords
-        this.logger.debug(`Using LIKE search for multi-keyword search${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+      if (hasChineseInKeywords || entityCount < this.entityCountThreshold) {
+        // Chinese text or small dataset: use SQL LIKE search with multiple keywords
+        if (hasChineseInKeywords) {
+          this.logger.debug(`Using LIKE search for multi-keyword search due to Chinese character detection${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+        } else {
+          this.logger.debug(`Using LIKE search for multi-keyword search (small dataset)${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+        }
         entities = await this.searchWithMultiKeywordLike(validKeywords, options);
       } else {
-        // Large dataset: use FTS search with multiple keywords
+        // Large dataset without Chinese: use FTS search with multiple keywords
         this.logger.debug(`Using FTS search for multi-keyword search${options?.scope ? ` with scope: ${options.scope}` : ''}`);
         entities = await this.searchWithMultiKeywordFTS(validKeywords, options);
       }
@@ -1349,8 +1427,71 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         };
       });
 
-      this.logger.debug(`Multi-keyword search completed: ${entities.length} entities, ${relations.length} relations`);
-      return { entities, relations };
+      // Apply output limiting if provided
+      const output = options?.output;
+
+      // Entity limiting
+      const maxEntities = output?.maxEntities && output.maxEntities > 0 ? output.maxEntities : undefined;
+      const limitedEntities = maxEntities ? entities.slice(0, maxEntities) : entities;
+
+      // Observations trimming
+      const includeObservations = output?.includeObservations ?? !output?.compact;
+      const maxObs = output?.maxObservationsPerEntity ?? undefined;
+      const snippetChars = output?.snippetChars ?? undefined;
+      const trimmedEntities = limitedEntities.map((e) => {
+        const total = e.observations?.length || 0;
+        if (!includeObservations) {
+          return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
+        }
+        if (!maxObs && !snippetChars) {
+          return { ...e, observations: e.observations || [], observationsCount: total };
+        }
+        const preview = (e.observations || [])
+          .slice(0, maxObs ?? total)
+          .map((t) => (snippetChars && typeof t === 'string' && t.length > snippetChars ? t.slice(0, snippetChars) : t));
+        const omitted = Math.max(0, total - (maxObs ?? total));
+        return { ...e, observations: preview, observationsCount: total, observationsPreview: preview, omittedObservations: omitted };
+      });
+
+      // Relations limiting
+      let finalRelations = relations;
+      const includeRelations = output?.includeRelations ?? 'subset';
+      if (includeRelations === 'none') {
+        finalRelations = [];
+      } else if (includeRelations === 'subset') {
+        const cap = output?.maxRelations ?? 200;
+        if (finalRelations.length > cap) {
+          finalRelations = finalRelations.slice(0, cap);
+          this.logger.debug(
+            `Relations capped for response: ${relations.length} -> ${finalRelations.length}`
+          );
+        }
+      }
+
+      // Apply progressive truncation if maxResponseChars limit is exceeded
+      const maxChars = output?.maxResponseChars ?? undefined;
+      let { 
+        finalEntities, 
+        finalRelations: truncatedRelations, 
+        wasTruncated,
+        finalOmittedEntities,
+        finalOmittedRelations 
+      } = this.applyProgressiveTruncation(
+        trimmedEntities, 
+        finalRelations, 
+        maxChars,
+        entities.length - trimmedEntities.length,
+        includeRelations === 'subset' ? Math.max(0, relations.length - finalRelations.length) : includeRelations === 'none' ? relations.length : 0
+      );
+
+      this.logger.debug(`Multi-keyword search completed: ${finalEntities.length} entities, ${truncatedRelations.length} relations${wasTruncated ? ' (truncated)' : ''}`);
+      return {
+        entities: finalEntities,
+        relations: truncatedRelations,
+        truncated: wasTruncated,
+        omittedEntities: finalOmittedEntities,
+        omittedRelations: finalOmittedRelations,
+      };
     } catch (error) {
       this.logger.error("Error in searchMultiKeywords", extractError(error));
       throw error;
@@ -2453,6 +2594,117 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   }
 
   /**
+   * Apply progressive truncation to response when it exceeds maxResponseChars
+   * Strategy: 1) Remove observations, 2) Reduce relations, 3) Reduce entities (min 5)
+   */
+  private applyProgressiveTruncation(
+    entities: Entity[],
+    relations: any[],
+    maxChars?: number,
+    initialOmittedEntities: number = 0,
+    initialOmittedRelations: number = 0
+  ): {
+    finalEntities: Entity[];
+    finalRelations: any[];
+    wasTruncated: boolean;
+    finalOmittedEntities: number;
+    finalOmittedRelations: number;
+  } {
+    // If no size limit, return as-is
+    if (!maxChars || maxChars <= 0) {
+      return {
+        finalEntities: entities,
+        finalRelations: relations,
+        wasTruncated: false,
+        finalOmittedEntities: initialOmittedEntities,
+        finalOmittedRelations: initialOmittedRelations,
+      };
+    }
+
+    let currentEntities = [...entities];
+    let currentRelations = [...relations];
+    let wasTruncated = false;
+    let currentOmittedEntities = initialOmittedEntities;
+    let currentOmittedRelations = initialOmittedRelations;
+
+    // Helper function to calculate current response size
+    const getCurrentSize = () => {
+      return JSON.stringify({ entities: currentEntities, relations: currentRelations }).length;
+    };
+
+    // Check if we need to truncate
+    if (getCurrentSize() <= maxChars) {
+      return {
+        finalEntities: currentEntities,
+        finalRelations: currentRelations,
+        wasTruncated: false,
+        finalOmittedEntities: currentOmittedEntities,
+        finalOmittedRelations: currentOmittedRelations,
+      };
+    }
+
+    wasTruncated = true;
+    this.logger.debug(`Response size ${getCurrentSize()} exceeds limit ${maxChars}, applying progressive truncation`);
+
+    // Step 1: Remove all observations, keep only observationsPreview
+    const entitiesWithoutObservations = currentEntities.map(entity => {
+      const totalObs = entity.observations?.length || 0;
+      if (totalObs > 0) {
+        const { observations, ...entityWithoutObs } = entity;
+        return {
+          ...entityWithoutObs,
+          observations: [],
+          observationsCount: totalObs,
+          observationsPreview: entity.observationsPreview || [],
+          omittedObservations: totalObs,
+        };
+      }
+      return entity;
+    });
+
+    currentEntities = entitiesWithoutObservations;
+    this.logger.debug(`After removing observations: ${getCurrentSize()} chars`);
+
+    // If still too large, Step 2: Reduce relations
+    if (getCurrentSize() > maxChars && currentRelations.length > 0) {
+      const targetRelations = Math.max(0, Math.floor(currentRelations.length * 0.5));
+      const originalRelationsCount = currentRelations.length + currentOmittedRelations;
+      currentRelations = currentRelations.slice(0, targetRelations);
+      currentOmittedRelations = originalRelationsCount - currentRelations.length;
+      this.logger.debug(`After reducing relations to ${targetRelations}: ${getCurrentSize()} chars`);
+    }
+
+    // If still too large, Step 3: Reduce entities (keep minimum 5)
+    if (getCurrentSize() > maxChars && currentEntities.length > 5) {
+      const targetEntities = Math.max(5, Math.floor(currentEntities.length * 0.7));
+      const originalEntitiesCount = currentEntities.length + currentOmittedEntities;
+      currentEntities = currentEntities.slice(0, targetEntities);
+      currentOmittedEntities = originalEntitiesCount - currentEntities.length;
+      this.logger.debug(`After reducing entities to ${targetEntities}: ${getCurrentSize()} chars`);
+    }
+
+    // Final size check - if still too large, more aggressive entity reduction
+    while (getCurrentSize() > maxChars && currentEntities.length > 1) {
+      const removedEntity = currentEntities.pop()!;
+      currentOmittedEntities++;
+      this.logger.debug(`Removed entity '${removedEntity.name}', current size: ${getCurrentSize()} chars`);
+    }
+
+    this.logger.debug(
+      `Truncation completed: ${currentEntities.length} entities, ${currentRelations.length} relations, ` +
+      `final size: ${getCurrentSize()} chars (limit: ${maxChars})`
+    );
+
+    return {
+      finalEntities: currentEntities,
+      finalRelations: currentRelations,
+      wasTruncated,
+      finalOmittedEntities: currentOmittedEntities,
+      finalOmittedRelations: currentOmittedRelations,
+    };
+  }
+
+  /**
    * Search using SQL LIKE queries for smaller datasets
    */
   private async searchWithLike(query: string, scope?: string, timeRange?: TimeRangeOptions): Promise<Entity[]> {
@@ -2767,24 +3019,41 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   /**
    * Get entities by name
    */
-  async openNodes(names: string[]): Promise<KnowledgeGraph> {
+  async openNodes(names: string[], options?: OpenNodesOptions): Promise<KnowledgeGraph> {
     if (names.length === 0) {
       return { entities: [], relations: [] };
     }
+
+    // Default to include observations for backward compatibility
+    const includeObservations = options?.includeObservations ?? true;
 
     try {
       const conn = await this.getConnection();
       const placeholders = names.map(() => "?").join(",");
 
-      const reader = await conn.runAndReadAll(
-        `
+      let query: string;
+      let queryParams: string[];
+
+      if (includeObservations) {
+        // Original query with observations
+        query = `
         SELECT e.name, e.entityType, e.created_at, o.content
         FROM entities e
         LEFT JOIN observations o ON e.name = o.entityName
         WHERE e.name IN (${placeholders})
-      `,
-        names
-      );
+        `;
+        queryParams = names;
+      } else {
+        // Optimized query without observations
+        query = `
+        SELECT e.name, e.entityType, e.created_at, NULL as content
+        FROM entities e
+        WHERE e.name IN (${placeholders})
+        `;
+        queryParams = names;
+      }
+
+      const reader = await conn.runAndReadAll(query, queryParams);
       const rows = reader.getRows();
 
       const entitiesMap = new Map<string, Entity>();
@@ -2800,9 +3069,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
             name,
             entityType,
             createdAt: convertTimestampToISOWithFallback(created_at),
-            observations: content ? [content] : [],
+            observations: includeObservations && content ? [content] : [],
           });
-        } else if (content) {
+        } else if (includeObservations && content) {
           entitiesMap.get(name)!.observations.push(content);
         }
       }

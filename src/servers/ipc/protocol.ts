@@ -6,6 +6,7 @@ import {
   MultiKeywordSearchOptions,
   SearchNodesOptions,
   TimeRangeOptions,
+  OpenNodesOptions,
 } from "../../types";
 import { validateTimeRangeOptions } from "../../utils/time-validation";
 
@@ -135,6 +136,7 @@ export interface OpenNodesRequest extends BaseRequest {
   type: "open_nodes";
   payload: {
     names: string[];
+    options?: OpenNodesOptions;
   };
 }
 
