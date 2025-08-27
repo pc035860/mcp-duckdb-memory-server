@@ -178,16 +178,16 @@ export class SecondaryServer {
     // Search nodes tool
     this.mcpServer.tool(
       "search_nodes",
-      "Search for nodes in the knowledge graph based on a query",
+      "Search for nodes in the knowledge graph using advanced search strategies including semantic search, keyword search, and hybrid search. Supports both traditional keyword matching and AI-powered semantic similarity search using OpenAI embeddings.",
       {
         query: z
           .string()
           .describe(
-            "The search query to match against entity names, types, and observation content"
+            "The search query to match against entity names, types, and observation content. For semantic search, use natural language descriptions (e.g., 'machine learning concepts', 'user authentication systems'). For keyword search, use specific terms."
           ),
         options: SearchNodesOptionsSchema
           .optional()
-          .describe("Search options including scope and time range filtering"),
+          .describe("Search options including scope, time range filtering, and search strategy. Use searchMode to control search behavior: 'keyword' for traditional text matching, 'semantic' for AI-powered similarity search, 'hybrid' for best of both approaches (recommended), or omit for automatic selection."),
       },
       async ({ query, options }) => {
         const mergedOptions = {
@@ -214,14 +214,14 @@ export class SecondaryServer {
     // Search multi keywords tool
     this.mcpServer.tool(
       "search_multi_keywords",
-      "Search for nodes using multiple keywords with configurable search options",
+      "Search for nodes using multiple keywords with advanced search capabilities. Supports traditional keyword matching and semantic similarity search. Use this tool when you have multiple related search terms or concepts that should be combined.",
       {
         keywords: z
           .array(z.string())
-          .describe("An array of keywords to search for"),
+          .describe("An array of keywords to search for. For semantic search, include conceptually related terms (e.g., ['authentication', 'login', 'security', 'user access']). For keyword search, use specific exact terms."),
         options: MultiKeywordSearchOptionsSchema
           .optional()
-          .describe("Search options including mode, scope and time range filtering"),
+          .describe("Search options including combination mode (AND/OR), scope, time range filtering, and output formatting. The search uses the same advanced strategies as search_nodes, automatically selecting the best approach based on available services."),
       },
       async ({ keywords, options }) => {
         const mergedOptions = {
@@ -248,10 +248,10 @@ export class SecondaryServer {
     // Open nodes tool
     this.mcpServer.tool(
       "open_nodes",
-      "Open specific nodes in the knowledge graph by their names",
+      "Retrieve complete details for specific entities by their exact names. Use this tool when you know the exact entity names and want full details including all observations and relations. This is different from search tools - use search_nodes for finding entities, then use open_nodes to get their complete information.",
       {
-        names: z.array(z.string()).describe("An array of entity names to retrieve"),
-        includeObservations: z.boolean().optional().describe("Whether to include observations (default: true)"),
+        names: z.array(z.string()).describe("An array of exact entity names to retrieve. Entity names are case-sensitive and must match exactly."),
+        includeObservations: z.boolean().optional().describe("Whether to include complete observation content (default: true). Set to false for lightweight entity metadata only."),
       },
       async ({ names, includeObservations }) => {
         const payload = await this.manager.openNodes(names, { includeObservations });

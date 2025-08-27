@@ -61,8 +61,11 @@ export const SearchNodesOptionsSchema = z.object({
     .describe("Optional scope to filter entities, e.g., 'project' or '[project]'"),
   timeRange: TimeRangeOptionsSchema
     .optional()
-    .describe("Optional time range filtering options")
-  ,
+    .describe("Optional time range filtering options"),
+  searchMode: z
+    .enum(['keyword', 'semantic', 'hybrid'])
+    .optional()
+    .describe("Search strategy: 'keyword' for traditional text search, 'semantic' for vector similarity search, 'hybrid' for combined approach (default: determined automatically)"),
   output: z
     .object({
       compact: z.boolean().optional(),

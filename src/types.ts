@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DuckDBValue } from '@duckdb/node-api';
+import type { EmbeddingVector } from './types/embedding.js';
 
 /**
  * Database row type for DuckDB query results
@@ -23,6 +24,11 @@ export type Entity = z.infer<typeof EntityObject> & {
   observationsCount?: number;
   observationsPreview?: string[];
   omittedObservations?: number;
+  
+  // Optional VSS fields (added in Phase 1)
+  embedding?: EmbeddingVector;
+  embeddingModel?: string;
+  embeddingUpdatedAt?: string; // ISO 8601 timestamp
 };
 
 /**
@@ -55,6 +61,11 @@ export const ObservationObject = z.object({
 });
 export type Observation = z.infer<typeof ObservationObject> & {
   createdAt?: string; // ISO 8601 timestamp, optional for backward compatibility
+  
+  // Optional VSS fields (added in Phase 1) 
+  embedding?: EmbeddingVector;
+  embeddingModel?: string;
+  embeddingUpdatedAt?: string; // ISO 8601 timestamp
 };
 
 /**
@@ -117,6 +128,7 @@ export type SearchNodesOptions = {
   scope?: string;  // Optional scope to filter entities, e.g., "project" or "[project]"
   timeRange?: TimeRangeOptions;  // Optional time range filtering
   output?: OutputLimitOptions; // Optional output limiting options
+  searchMode?: 'keyword' | 'semantic' | 'hybrid';  // Search strategy (added in VSS Phase 1)
 };
 
 /**

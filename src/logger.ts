@@ -132,3 +132,11 @@ export class ConsoleLogger implements Logger {
     return levels.indexOf(messageLevel) >= levels.indexOf(this.level);
   }
 }
+
+// Default logger instance
+export const logger = new ConsoleLogger();
+
+// Set debug level if DEBUG environment variable is set
+if (process.env.DEBUG === '1' || process.env.DEBUG === 'true') {
+  logger.setLevel(LogLevel.DEBUG);
+}

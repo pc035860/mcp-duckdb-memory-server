@@ -17,6 +17,15 @@ import { existsSync, mkdirSync } from "fs";
 import { extractError, convertTimestampToISOWithFallback } from "../utils";
 import { ConcurrencyController, OperationType } from "../utils/concurrency-controller";
 import { containsChinese } from "../utils/text-utils";
+import { MigrationManager } from "../migrations/migration-manager.js";
+
+// VSS imports
+import { OpenAIEmbeddingService, createEmbeddingCache } from "../services/embedding/index.js";
+import { DuckDBVSSManager } from "../services/vss/index.js";
+import { HybridSearchEngine } from "../services/search/index.js";
+import type { IEmbeddingService } from "../types/embedding.js";
+import type { IVSSManager } from "../types/vss.js";
+import type { SearchStrategy, KeywordSearchResult } from "../services/search/index.js";
 
 /**
  * DuckDB implementation with persistent connection (no cleanup per operation)
@@ -42,6 +51,11 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   
   // FTS index rebuild debounce time in milliseconds
   private static readonly FTS_REBUILD_DEBOUNCE_MS = 5000;
+  
+  // VSS services (optional, initialized on demand)
+  private embeddingService: IEmbeddingService | null = null;
+  private vssManager: IVSSManager | null = null;
+  private hybridSearchEngine: HybridSearchEngine | null = null;
 
   constructor(dbPathResolver: () => string, logger?: Logger, allowExternalTimestamps: boolean = false, entityCountThreshold: number = 1000) {
     const dbPath = dbPathResolver();
@@ -92,8 +106,12 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     if (this.initialized || this.closed) return;
 
     try {
-      // Create DuckDB instance
-      this.instance = await DuckDBInstance.create(this.dbPath);
+      // Create DuckDB instance with VSS configuration
+      // Enable HNSW persistence for vector similarity search (experimental)
+      const duckdbConfig = {
+        hnsw_enable_experimental_persistence: true,
+      };
+      this.instance = await DuckDBInstance.create(this.dbPath, duckdbConfig);
       this.connection = await this.instance.connect();
 
       // Clean up any residual migration artifacts from abnormal shutdowns
@@ -177,6 +195,10 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       
       // Handle migration for observations table - add id column if it doesn't exist
       await this.migrateObservationsTable();
+      
+      // Run database schema migrations (including VSS support)
+      const migrationManager = new MigrationManager(this.connection);
+      await migrationManager.runMigrations();
 
       // Legacy data migration timestamp - intentionally hardcoded for consistency
       // This ensures all migrated records have the same timestamp for data integrity
@@ -191,6 +213,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Initialize FTS search capabilities
       await this.initializeFTS();
+      
+      // Initialize VSS services if available
+      await this.initializeVSSServices();
 
       this.initialized = true;
       this.logger.info("DuckDB Manager initialized with persistent connection");
@@ -1232,27 +1257,27 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       let entities: Entity[] = [];
       
-      // Extract scope from options
+      // Extract scope and searchMode from options
       const scope = options?.scope;
+      const searchMode = options?.searchMode;
       
-      // Get entity count to determine search strategy
-      const entityCount = await this.getCachedEntityCount();
-      const hasChinese = containsChinese(query);
-      this.logger.debug(`Entity count: ${entityCount}, Chinese detected: ${hasChinese}, choosing search strategy${scope ? ` with scope: ${scope}` : ''}`);
+      // Log search parameters
+      this.logger.debug(`Search request: "${query}", mode: ${searchMode || 'auto'}, scope: ${scope || 'none'}, VSS available: ${this.isVSSAvailable()}`);
       
-      // Choose search strategy based on dataset size and Chinese character detection
-      if (hasChinese || entityCount < this.entityCountThreshold) {
-        // Chinese text or small dataset: use SQL LIKE search
-        if (hasChinese) {
-          this.logger.debug("Using LIKE search due to Chinese character detection");
-        } else {
-          this.logger.debug("Using LIKE search for small dataset");
+      // Use hybrid search engine if available and searchMode allows it
+      if (this.isVSSAvailable() && this.hybridSearchEngine && (searchMode === 'semantic' || searchMode === 'hybrid' || (!searchMode && !containsChinese(query)))) {
+        try {
+          this.logger.debug(`Using hybrid search engine with mode: ${searchMode || 'auto'}`);
+          const hybridResults = await this.hybridSearchEngine.searchHybrid(query, options);
+          entities = hybridResults.map(result => result.entity);
+        } catch (error) {
+          this.logger.warn("Hybrid search failed, falling back to traditional search", extractError(error));
+          entities = await this.performTraditionalSearch(query, scope, options?.timeRange);
         }
-        entities = await this.searchWithLike(query, scope, options?.timeRange);
       } else {
-        // Large dataset without Chinese: use FTS search
-        this.logger.debug("Using FTS search for large dataset");
-        entities = await this.searchWithFTS(query, scope, options?.timeRange);
+        // Fallback to traditional search (keyword only)
+        this.logger.debug(`Using traditional search (keyword only), mode: ${searchMode || 'auto'}`);
+        entities = await this.performTraditionalSearch(query, scope, options?.timeRange);
       }
       
 
@@ -3238,5 +3263,155 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       ...status,
       queueStats,
     };
+  }
+
+  /**
+   * Initialize VSS services if environment supports it
+   */
+  private async initializeVSSServices(): Promise<void> {
+    try {
+      // Check if OpenAI API key is available
+      const openaiApiKey = process.env.OPENAI_API_KEY;
+      if (!openaiApiKey) {
+        this.logger.info("OpenAI API key not found, VSS services will not be available");
+        return;
+      }
+
+      this.logger.info("Initializing VSS services...");
+
+      // Initialize embedding service with complete configuration
+      const embeddingConfig = {
+        apiKey: openaiApiKey,
+        model: "text-embedding-3-small",
+        timeout: 30000,
+        retries: 3,
+        batchSize: 100,
+        // baseURL can be added here if needed for custom endpoints
+      };
+      
+      this.embeddingService = new OpenAIEmbeddingService(embeddingConfig);
+
+      // Test embedding service health
+      const isHealthy = await this.embeddingService.checkHealth();
+      if (!isHealthy) {
+        this.logger.warn("Embedding service health check failed, VSS services disabled");
+        return;
+      }
+
+      // Initialize VSS manager with complete configuration
+      const vssConfig = {
+        enabled: true,
+        indexParams: {
+          metric: 'cosine' as const,
+          efConstruction: 200,
+          M: 16,
+        },
+        autoRebuild: {
+          enabled: true,
+          threshold: 0.1,
+          batchSize: 100,
+        },
+        fallback: {
+          enabled: true,
+          strategy: 'keyword' as const,
+        },
+      };
+      
+      this.vssManager = new DuckDBVSSManager(
+        this.connection!,
+        this.embeddingService,
+        vssConfig
+      );
+
+      await this.vssManager.initialize();
+
+      // Initialize hybrid search engine
+      const keywordSearchStrategy: SearchStrategy = {
+        performKeywordSearch: async (query: string, options?: SearchNodesOptions): Promise<KeywordSearchResult[]> => {
+          // Use existing FTS/LIKE search logic, adapted for SearchStrategy interface
+          return this.performKeywordSearchInternal(query, options);
+        }
+      };
+
+      this.hybridSearchEngine = new HybridSearchEngine(
+        this.embeddingService,
+        this.vssManager,
+        keywordSearchStrategy
+      );
+
+      this.logger.info("VSS services initialized successfully");
+    } catch (error) {
+      this.logger.warn("Failed to initialize VSS services, semantic search will not be available", extractError(error));
+      // Reset services on failure
+      this.embeddingService = null;
+      this.vssManager = null;
+      this.hybridSearchEngine = null;
+    }
+  }
+
+  /**
+   * Perform traditional search (original FTS/LIKE logic)
+   */
+  private async performTraditionalSearch(
+    query: string, 
+    scope?: string, 
+    timeRange?: TimeRangeOptions
+  ): Promise<Entity[]> {
+    const entityCount = await this.getCachedEntityCount();
+    const hasChinese = containsChinese(query);
+    
+    // Choose search strategy based on dataset size and Chinese character detection
+    if (hasChinese || entityCount < this.entityCountThreshold) {
+      // Chinese text or small dataset: use SQL LIKE search
+      if (hasChinese) {
+        this.logger.debug("Using LIKE search due to Chinese character detection");
+      } else {
+        this.logger.debug("Using LIKE search for small dataset");
+      }
+      return await this.searchWithLike(query, scope, timeRange);
+    } else {
+      // Large dataset without Chinese: use FTS search
+      this.logger.debug("Using FTS search for large dataset");
+      return await this.searchWithFTS(query, scope, timeRange);
+    }
+  }
+
+  /**
+   * Internal keyword search implementation for SearchStrategy interface
+   */
+  private async performKeywordSearchInternal(
+    query: string, 
+    options?: SearchNodesOptions
+  ): Promise<KeywordSearchResult[]> {
+    const entities = await this.performTraditionalSearch(query, options?.scope, options?.timeRange);
+
+    // Convert to KeywordSearchResult format
+    return entities.map(entity => ({
+      entity,
+      relevanceScore: 0.8, // Default relevance score for keyword matches
+      matchSource: 'entity' as const, // Simplified - could be enhanced to detect actual match source
+      matchedContent: undefined, // Could be enhanced to include matched content
+    }));
+  }
+
+  /**
+   * Check if VSS (semantic search) is available
+   */
+  public isVSSAvailable(): boolean {
+    return !!(this.vssManager?.isEnabled() && this.embeddingService && this.hybridSearchEngine);
+  }
+
+  /**
+   * Get VSS manager for direct access (if available)
+   */
+  public getVSSManager(): IVSSManager | null {
+    return this.vssManager;
+  }
+
+  /**
+   * Get embedding service for direct access (if available)
+   */
+  public getEmbeddingService(): IEmbeddingService | null {
+    return this.embeddingService;
   }
 }
