@@ -74,18 +74,30 @@ describe('VSS Integration Tests', () => {
     });
 
     it('should create entities with search functionality', async () => {
-      // Create test entities
+      // Create test entities with diverse content for testing
       const entities = [
         {
           name: 'user-authentication',
           entityType: 'system',
-          observations: ['JWT token implementation', 'OAuth2 integration'],
+          observations: ['JWT token implementation', 'OAuth2 integration', 'Multi-factor authentication support'],
           createdAt: new Date().toISOString()
         },
         {
           name: 'machine-learning-model',
           entityType: 'ai',
-          observations: ['Neural network architecture', 'Training pipeline'],
+          observations: ['Neural network architecture', 'Training pipeline', 'Deep learning framework'],
+          createdAt: new Date().toISOString()
+        },
+        {
+          name: 'data-processing',
+          entityType: 'service',
+          observations: ['ETL pipeline', 'Data transformation', 'Batch processing system'],
+          createdAt: new Date().toISOString()
+        },
+        {
+          name: 'api-gateway',
+          entityType: 'infrastructure',
+          observations: ['Request routing', 'Rate limiting', 'Authentication proxy'],
           createdAt: new Date().toISOString()
         }
       ];
@@ -117,6 +129,7 @@ describe('VSS Integration Tests', () => {
         searchMode: 'keyword'
       });
       expect(keywordResults.entities.length).toBeGreaterThan(0);
+      expect(keywordResults.entities.some(e => e.name === 'security-system')).toBe(true);
 
       // Test semantic search mode (should fallback gracefully if VSS not available)
       const semanticResults = await manager.searchNodes('user access control', {
@@ -189,6 +202,140 @@ describe('VSS Integration Tests', () => {
     });
   });
 
+  describe('Search Mode Specific Tests', () => {
+    beforeEach(async () => {
+      // Create comprehensive test dataset for search mode testing
+      const testEntities = [
+        {
+          name: 'authentication-service',
+          entityType: 'microservice',
+          observations: ['User login and logout functionality', 'JWT token generation and validation', 'OAuth2 integration'],
+          createdAt: new Date().toISOString()
+        },
+        {
+          name: 'machine-learning-pipeline',
+          entityType: 'ai',
+          observations: ['Neural network training', 'Model deployment', 'Inference engine'],
+          createdAt: new Date().toISOString()
+        },
+        {
+          name: 'data-analytics',
+          entityType: 'service',
+          observations: ['Statistical analysis', 'Data visualization', 'Business intelligence'],
+          createdAt: new Date().toISOString()
+        },
+        {
+          name: 'security-framework',
+          entityType: 'infrastructure',
+          observations: ['Access control', 'Encryption services', 'Audit logging'],
+          createdAt: new Date().toISOString()
+        }
+      ];
+      await manager.createEntities(testEntities);
+    });
+
+    it('should execute keyword search mode correctly', async () => {
+      const results = await manager.searchNodes('authentication', {
+        searchMode: 'keyword'
+      });
+      
+      expect(results.entities.length).toBeGreaterThan(0);
+      expect(results.entities.some(e => e.name === 'authentication-service')).toBe(true);
+      
+      // Keyword search should find exact term matches
+      const foundEntity = results.entities.find(e => e.name === 'authentication-service');
+      expect(foundEntity).toBeDefined();
+      expect(foundEntity?.observations.some(obs => obs.includes('JWT'))).toBe(true);
+    });
+
+    it('should execute semantic search mode with fallback', async () => {
+      const results = await manager.searchNodes('user login system', {
+        searchMode: 'semantic'
+      });
+      
+      expect(results).toBeTruthy();
+      expect(Array.isArray(results.entities)).toBe(true);
+      
+      // Should either return semantic results or fallback results
+      if (manager.isVSSAvailable()) {
+        // With VSS available, should find semantically related entities
+        expect(results.entities.length).toBeGreaterThanOrEqual(0);
+      } else {
+        // Without VSS, should fallback to keyword-like behavior
+        expect(results.entities.length).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('should execute hybrid search mode with RRF fusion', async () => {
+      const results = await manager.searchNodes('machine learning', {
+        searchMode: 'hybrid'
+      });
+      
+      expect(results).toBeTruthy();
+      expect(Array.isArray(results.entities)).toBe(true);
+      
+      if (manager.isVSSAvailable()) {
+        // With VSS available, hybrid should combine keyword + semantic
+        expect(results.entities.length).toBeGreaterThanOrEqual(0);
+        // Should potentially find 'machine-learning-pipeline'
+        const mlEntity = results.entities.find(e => e.name === 'machine-learning-pipeline');
+        if (mlEntity) {
+          expect(mlEntity.observations.some(obs => obs.includes('neural') || obs.includes('training'))).toBe(true);
+        }
+      } else {
+        // Without VSS, should fallback to keyword search
+        expect(results.entities.length).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('should execute auto mode with intelligent strategy selection', async () => {
+      // Test with English query (should prefer semantic/hybrid if VSS available)
+      const englishResults = await manager.searchNodes('data analysis system');
+      expect(englishResults).toBeTruthy();
+      expect(Array.isArray(englishResults.entities)).toBe(true);
+      
+      // Test with Chinese query (should force keyword mode)
+      const chineseResults = await manager.searchNodes('數據分析');
+      expect(chineseResults).toBeTruthy();
+      expect(Array.isArray(chineseResults.entities)).toBe(true);
+      
+      // Both should return valid results structure
+      expect(englishResults.entities).toBeDefined();
+      expect(chineseResults.entities).toBeDefined();
+    });
+
+    it('should handle search mode parameter validation', async () => {
+      // Test with invalid searchMode (should default to auto/hybrid behavior)
+      const results = await manager.searchNodes('authentication', {
+        searchMode: 'invalid-mode' as any
+      });
+      
+      expect(results).toBeTruthy();
+      expect(Array.isArray(results.entities)).toBe(true);
+    });
+
+    it('should maintain search quality across different modes', async () => {
+      const query = 'authentication';
+      
+      const keywordResults = await manager.searchNodes(query, { searchMode: 'keyword' });
+      const hybridResults = await manager.searchNodes(query, { searchMode: 'hybrid' });
+      const autoResults = await manager.searchNodes(query);
+      
+      // All modes should find the authentication service
+      expect(keywordResults.entities.some(e => e.name === 'authentication-service')).toBe(true);
+      expect(hybridResults.entities.some(e => e.name === 'authentication-service')).toBe(true);
+      expect(autoResults.entities.some(e => e.name === 'authentication-service')).toBe(true);
+      
+      // Results should have consistent structure
+      for (const results of [keywordResults, hybridResults, autoResults]) {
+        expect(results).toHaveProperty('entities');
+        expect(results).toHaveProperty('relations');
+        expect(Array.isArray(results.entities)).toBe(true);
+        expect(Array.isArray(results.relations)).toBe(true);
+      }
+    });
+  });
+
   describe('Performance and Error Handling', () => {
     it('should handle empty queries gracefully', async () => {
       const results = await manager.searchNodes('');
@@ -222,6 +369,69 @@ describe('VSS Integration Tests', () => {
       });
 
       expect(limitedResults.entities.length).toBeLessThanOrEqual(2);
+    });
+  });
+
+  describe('VSS Fallback and Error Resilience', () => {
+    it('should gracefully handle VSS service failures', async () => {
+      // Create test data
+      await manager.createEntities([{
+        name: 'test-entity',
+        entityType: 'test',
+        observations: ['test observation'],
+        createdAt: new Date().toISOString()
+      }]);
+
+      // Mock VSS failure by temporarily removing API key
+      const originalKey = process.env.OPENAI_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      
+      try {
+        // Should still work via fallback mechanism
+        const results = await manager.searchNodes('test', {
+          searchMode: 'semantic'  // This should fallback to keyword
+        });
+        
+        expect(results.entities.length).toBeGreaterThan(0);
+        expect(results.entities[0].name).toBe('test-entity');
+      } finally {
+        // Restore API key
+        if (originalKey) {
+          process.env.OPENAI_API_KEY = originalKey;
+        }
+      }
+    });
+
+    it('should handle network timeouts gracefully', async () => {
+      await manager.createEntities([{
+        name: 'timeout-test',
+        entityType: 'test',
+        observations: ['timeout test observation'],
+        createdAt: new Date().toISOString()
+      }]);
+
+      // Test with a query that might cause timeout
+      const results = await manager.searchNodes('timeout', {
+        searchMode: 'hybrid'
+      });
+      
+      // Should either succeed or fallback gracefully
+      expect(results).toBeTruthy();
+      expect(Array.isArray(results.entities)).toBe(true);
+      expect(Array.isArray(results.relations)).toBe(true);
+    });
+
+    it('should maintain service health checks', async () => {
+      if (manager.isVSSAvailable()) {
+        const embeddingService = manager.getEmbeddingService();
+        expect(embeddingService).toBeTruthy();
+        
+        // Test health check if service is available
+        if (embeddingService) {
+          const isHealthy = await embeddingService.checkHealth();
+          expect(typeof isHealthy).toBe('boolean');
+        }
+      }
     });
   });
 

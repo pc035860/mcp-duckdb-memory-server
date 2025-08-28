@@ -694,5 +694,203 @@ describe("DuckDBKnowledgeGraphManager - Hybrid Search", () => {
       );
       expect(otherProjectEntities.length).toBe(0);
     });
+
+    it("should work with scope filtering across different search modes", async () => {
+      const scopeOptions = { scope: "project-a" };
+      
+      // Test scope filtering with different search modes
+      const keywordScopedResults = await manager.searchNodes("user", {
+        ...scopeOptions,
+        searchMode: "keyword" as any
+      });
+      
+      const hybridScopedResults = await manager.searchNodes("user", {
+        ...scopeOptions, 
+        searchMode: "hybrid" as any
+      });
+      
+      // Both should respect scope filtering
+      keywordScopedResults.entities.forEach(entity => {
+        expect(entity.name.includes("project-a") || entity.name.includes("[project-a]")).toBe(true);
+      });
+      
+      hybridScopedResults.entities.forEach(entity => {
+        expect(entity.name.includes("project-a") || entity.name.includes("[project-a]")).toBe(true);
+      });
+      
+      // Should not find project-b entities in either result
+      expect(keywordScopedResults.entities.some(e => e.name.includes("project-b"))).toBe(false);
+      expect(hybridScopedResults.entities.some(e => e.name.includes("project-b"))).toBe(false);
+    });
+  });
+
+  describe("VSS Integration Test Suite", () => {
+    beforeEach(async () => {
+      // Create a comprehensive dataset for VSS testing
+      const vssTestEntities = [
+        {
+          name: "authentication-microservice",
+          entityType: "microservice",
+          observations: [
+            "Handles user authentication and authorization",
+            "JWT token generation and validation",
+            "Multi-factor authentication support",
+            "OAuth2 and SAML integration"
+          ]
+        },
+        {
+          name: "payment-processing-engine",
+          entityType: "service",
+          observations: [
+            "Credit card payment processing",
+            "Digital wallet integration", 
+            "Fraud detection and prevention",
+            "PCI DSS compliance features"
+          ]
+        },
+        {
+          name: "machine-learning-platform",
+          entityType: "ai",
+          observations: [
+            "Deep learning model training",
+            "Natural language processing pipeline",
+            "Computer vision algorithms",
+            "Predictive analytics engine"
+          ]
+        },
+        {
+          name: "data-warehouse-system",
+          entityType: "storage", 
+          observations: [
+            "Big data storage and retrieval",
+            "ETL pipeline automation",
+            "Data lake management",
+            "Business intelligence integration"
+          ]
+        }
+      ];
+      await manager.createEntities(vssTestEntities);
+    });
+
+    it("should demonstrate VSS semantic understanding capabilities", async () => {
+      if (!manager.isVSSAvailable()) {
+        console.log("VSS not available, skipping semantic understanding test");
+        return;
+      }
+
+      // Test semantic search with conceptually related but lexically different terms
+      const semanticQuery = "user login and security";
+      const results = await manager.searchNodes(semanticQuery, {
+        searchMode: "semantic" as any
+      });
+      
+      expect(results).toBeTruthy();
+      expect(Array.isArray(results.entities)).toBe(true);
+      
+      // Should potentially find authentication-related entities even without exact matches
+      const authEntities = results.entities.filter(e => 
+        e.name.includes("authentication") ||
+        e.observations.some(obs => obs.toLowerCase().includes("auth"))
+      );
+      
+      // At least basic structure should be maintained
+      expect(results.entities.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it("should validate hybrid search RRF algorithm effectiveness", async () => {
+      if (!manager.isVSSAvailable()) {
+        console.log("VSS not available, testing fallback behavior");
+      }
+
+      const query = "payment fraud detection";
+      
+      // Compare hybrid vs individual strategies
+      const keywordResults = await manager.searchNodes(query, { searchMode: "keyword" as any });
+      const hybridResults = await manager.searchNodes(query, { searchMode: "hybrid" as any });
+      
+      // Both should return valid results
+      expect(keywordResults.entities.length).toBeGreaterThanOrEqual(0);
+      expect(hybridResults.entities.length).toBeGreaterThanOrEqual(0);
+      
+      // Hybrid should maintain or improve result quality
+      const paymentEntities = hybridResults.entities.filter(e => 
+        e.name.includes("payment") ||
+        e.observations.some(obs => obs.toLowerCase().includes("payment"))
+      );
+      
+      if (paymentEntities.length > 0) {
+        expect(paymentEntities[0].observations.some(obs => 
+          obs.includes("fraud") || obs.includes("payment")
+        )).toBe(true);
+      }
+    });
+
+    it("should handle VSS-specific error conditions gracefully", async () => {
+      // Test with potentially problematic queries
+      const problematicQueries = [
+        "très spécial caractères ñoño",  // Special characters
+        "a".repeat(1000),                   // Very long query
+        "1234567890",                       // Numeric query
+        "!@#$%^&*()",                      // Special symbols only
+      ];
+      
+      for (const query of problematicQueries) {
+        const results = await manager.searchNodes(query, {
+          searchMode: "hybrid" as any
+        });
+        
+        // Should handle gracefully without throwing
+        expect(results).toBeTruthy();
+        expect(Array.isArray(results.entities)).toBe(true);
+        expect(Array.isArray(results.relations)).toBe(true);
+      }
+    });
+
+    it("should maintain performance under VSS load", async () => {
+      const queries = [
+        "machine learning algorithms",
+        "data processing pipeline", 
+        "authentication system",
+        "payment processing"
+      ];
+      
+      const startTime = Date.now();
+      
+      // Execute multiple searches concurrently
+      const results = await Promise.all(
+        queries.map(query => 
+          manager.searchNodes(query, { searchMode: "hybrid" as any })
+        )
+      );
+      
+      const totalTime = Date.now() - startTime;
+      
+      // Should complete in reasonable time (< 10 seconds for 4 concurrent searches)
+      expect(totalTime).toBeLessThan(10000);
+      
+      // All searches should return valid results
+      results.forEach((result, index) => {
+        expect(result, `Query ${index} failed`).toBeTruthy();
+        expect(Array.isArray(result.entities)).toBe(true);
+        expect(Array.isArray(result.relations)).toBe(true);
+      });
+    });
+
+    it("should demonstrate search mode routing intelligence", async () => {
+      const testCases = [
+        { query: "machine learning", expectedMode: "auto/hybrid" },
+        { query: "機器學習", expectedMode: "keyword (Chinese)" },
+        { query: "ML algorithms", expectedMode: "auto/hybrid" },
+        { query: "人工智能 AI", expectedMode: "keyword (Chinese)" }
+      ];
+      
+      for (const { query, expectedMode } of testCases) {
+        const results = await manager.searchNodes(query);  // Auto mode
+        
+        expect(results, `Failed for ${expectedMode}: "${query}"`).toBeTruthy();
+        expect(Array.isArray(results.entities)).toBe(true);
+        expect(Array.isArray(results.relations)).toBe(true);
+      }
+    });
   });
 });

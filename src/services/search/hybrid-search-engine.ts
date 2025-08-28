@@ -243,7 +243,7 @@ export class HybridSearchEngine {
       includeEmbeddings: false,
     };
 
-    return this.vssManager.searchWithVSS(embeddingResult.embedding, vssOptions);
+    return this.vssManager.searchWithVSS(embeddingResult.vector, vssOptions);
   }
 
   /**
