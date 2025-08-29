@@ -84,7 +84,7 @@ describe('Auto Mode Search Intelligence', () => {
   });
 
   afterEach(async () => {
-    if (manager && !manager.isClosed()) {
+    if (manager && !manager.isClosed) {
       await manager.close();
     }
     // Clean up env
