@@ -251,6 +251,13 @@ DEBUG=1|true                  # 除錯模式（啟用詳細日誌和配置顯示
 ENTITY_COUNT_THRESHOLD=1000   # 搜尋策略切換閾值（< 閾值用LIKE，≥ 閾值用FTS）
                              # 設為 0 則總是使用 FTS；設為很大值則偏好 LIKE
 
+# Embedding 自動生成配置（non-blocking 即時 embedding）
+EMBEDDING_AUTO_GENERATE=true      # 是否啟用自動 embedding 生成（預設：true）
+EMBEDDING_DEBOUNCE_MS=3000         # embedding 生成去抖動延遲（毫秒，預設：3000）
+EMBEDDING_BATCH_SIZE=10            # embedding 批次處理大小（預設：10）
+EMBEDDING_MAX_RETRIES=3            # embedding 生成最大重試次數（預設：3）
+OPENAI_API_KEY=your_api_key_here   # OpenAI API 金鑰（VSS 功能必需）
+
 # Output Compaction 預設（Phase 2/2.5）
 OUTPUT_COMPACT=true                    # 預設啟用 compact（僅索引級資料）
 OUTPUT_INCLUDE_OBSERVATIONS=false      # 預設不回傳 observations 內容

@@ -20,7 +20,6 @@ test-*.json
 *.log
 
 # Scripts directory (if for testing)
-scripts/
 
 # Fixed/repacked data files
 *.fixed.data
@@ -31,4 +30,5 @@ scripts/
 test-migration-*.sh
 test-error-recovery.sh
 
-.serena/cache
+\.serena/cache
+:memory:*

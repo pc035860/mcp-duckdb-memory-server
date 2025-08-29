@@ -27,6 +27,10 @@ import type { IEmbeddingService } from "../types/embedding.js";
 import type { IVSSManager } from "../types/vss.js";
 import type { SearchStrategy, KeywordSearchResult } from "../services/search/index.js";
 
+// Embedding Queue imports
+import { EmbeddingQueueManager } from "../services/embedding/embedding-queue-manager.js";
+import type { EmbeddingQueueConfig, EmbeddingQueueCallbacks } from "../services/embedding/embedding-queue-manager.js";
+
 /**
  * DuckDB implementation with persistent connection (no cleanup per operation)
  */
@@ -52,6 +56,10 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   // FTS index rebuild debounce time in milliseconds
   private static readonly FTS_REBUILD_DEBOUNCE_MS = 5000;
   
+  // Embedding generation (now managed by EmbeddingQueueManager)
+  private embeddingQueueManager: EmbeddingQueueManager | null = null;
+  private embeddingAutoGenerate: boolean = true; // configurable via env var
+
   // VSS services (optional, initialized on demand)
   private embeddingService: IEmbeddingService | null = null;
   private vssManager: IVSSManager | null = null;
@@ -63,6 +71,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     this.logger = logger || new ConsoleLogger();
     this.allowExternalTimestamps = allowExternalTimestamps;
     this.entityCountThreshold = entityCountThreshold;
+    
+    // Configure embedding auto-generation from environment variable
+    this.embeddingAutoGenerate = process.env.EMBEDDING_AUTO_GENERATE !== 'false';
     
     // Initialize concurrency controller
     this.concurrencyController = new ConcurrencyController(this.logger);
@@ -769,6 +780,12 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.logger.debug("FTS rebuild timer cleared during close");
       }
 
+      // Cleanup embedding queue manager
+      if (this.embeddingQueueManager) {
+        this.embeddingQueueManager.cleanup();
+        this.logger.debug("EmbeddingQueueManager cleaned up during close");
+      }
+
       if (this.connection) {
         try {
           // Try to execute CHECKPOINT to ensure data is written to disk
@@ -959,6 +976,35 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       // Schedule FTS index rebuild after data changes
       await this.scheduleIndexRebuild();
 
+      // Schedule embedding generation for newly created entities (non-blocking)
+      if (newEntities.length > 0) {
+        const entityNames = newEntities.map(e => e.name);
+        this.addEntitiesToEmbeddingQueue(entityNames);
+        
+        // Also queue observation IDs for embedding generation
+        const observationIds: number[] = [];
+        for (const entity of createdEntities) {
+          // Get observation IDs for the entity
+          try {
+            const obsReader = await conn.runAndReadAll(
+              "SELECT id FROM observations WHERE entityName = ?",
+              [entity.name]
+            );
+            const obsRows = obsReader.getRows();
+            observationIds.push(...obsRows.map(row => row[0] as number));
+          } catch (error) {
+            this.logger.debug("Failed to get observation IDs for embedding", extractError(error));
+          }
+        }
+        
+        if (observationIds.length > 0) {
+          this.addObservationsToEmbeddingQueue(observationIds);
+        }
+        
+        // Trigger embedding generation (non-blocking)
+        await this.scheduleEmbeddingGeneration();
+      }
+
       return createdEntities;
     } catch (error: unknown) {
       await conn.run("ROLLBACK");
@@ -1130,6 +1176,43 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Schedule FTS index rebuild after data changes
       await this.scheduleIndexRebuild();
+
+      // Schedule embedding generation for newly added observations (non-blocking)
+      if (addedObservations.length > 0) {
+        const observationIds: number[] = [];
+        const affectedEntityNames = new Set<string>();
+        
+        for (const observation of addedObservations) {
+          affectedEntityNames.add(observation.entityName);
+          
+          // Get observation IDs for the new contents
+          for (const content of observation.contents) {
+            try {
+              const obsReader = await conn.runAndReadAll(
+                "SELECT id FROM observations WHERE entityName = ? AND content = ?",
+                [observation.entityName, content]
+              );
+              const obsRows = obsReader.getRows();
+              observationIds.push(...obsRows.map(row => row[0] as number));
+            } catch (error) {
+              this.logger.debug("Failed to get observation ID for embedding", extractError(error));
+            }
+          }
+        }
+        
+        // Queue affected entities for re-embedding (since observations changed)
+        if (affectedEntityNames.size > 0) {
+          this.addEntitiesToEmbeddingQueue(Array.from(affectedEntityNames));
+        }
+        
+        // Queue new observations for embedding
+        if (observationIds.length > 0) {
+          this.addObservationsToEmbeddingQueue(observationIds);
+        }
+        
+        // Trigger embedding generation (non-blocking)
+        await this.scheduleEmbeddingGeneration();
+      }
 
       return addedObservations;
     } catch (error: unknown) {
@@ -3278,7 +3361,104 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.logger.error("Error scheduling FTS index rebuild", extractError(error));
     }
   }
+
+  /**
+   * Initialize EmbeddingQueueManager with proper configuration and callbacks
+   */
+  private async initializeEmbeddingQueueManager(): Promise<void> {
+    if (!this.embeddingService) {
+      this.logger.warn("Embedding service not available, EmbeddingQueueManager not initialized");
+      return;
+    }
+
+    const config: EmbeddingQueueConfig = {
+      debounceMs: parseInt(process.env.EMBEDDING_DEBOUNCE_MS || '3000'),
+      batchSize: parseInt(process.env.EMBEDDING_BATCH_SIZE || '10'),
+      maxRetries: parseInt(process.env.EMBEDDING_MAX_RETRIES || '3'),
+      autoGenerate: this.embeddingAutoGenerate
+    };
+
+    const callbacks: EmbeddingQueueCallbacks = {
+      getConnection: async () => {
+        if (!this.connection) {
+          throw new Error('Database connection is not available');
+        }
+        return this.connection;
+      },
+      isVSSAvailable: () => this.isVSSAvailable(),
+      isEntityEmbeddingsAvailable: () => this.checkEntityEmbeddingsTableExists()
+    };
+
+    this.embeddingQueueManager = new EmbeddingQueueManager(
+      config,
+      callbacks,
+      this.logger,
+      this.embeddingService
+    );
+
+    this.logger.info("EmbeddingQueueManager initialized successfully");
+  }
+
+  /**
+   * Check if entity_embeddings table exists (Strategy C support)
+   */
+  private async checkEntityEmbeddingsTableExists(): Promise<boolean> {
+    try {
+      const result = await this.connection!.runAndReadAll(
+        "SELECT COUNT(*) as count FROM information_schema.tables WHERE table_name = 'entity_embeddings'"
+      );
+      const rows = result.getRows();
+      const count = Number(rows?.[0]?.[0] || 0);
+      return count > 0;
+    } catch (error) {
+      this.logger.debug("Failed to check entity_embeddings table existence", extractError(error));
+      return false;
+    }
+  }
+
   
+  /**
+   * Add entities to embedding queue for processing
+   */
+  private addEntitiesToEmbeddingQueue(entityNames: string[]): void {
+    if (this.embeddingQueueManager) {
+      this.embeddingQueueManager.addEntitiesToQueue(entityNames);
+    }
+  }
+
+  /**
+   * Add observations to embedding queue for processing
+   */
+  private addObservationsToEmbeddingQueue(observationIds: number[]): void {
+    if (this.embeddingQueueManager) {
+      this.embeddingQueueManager.addObservationsToQueue(observationIds);
+    }
+  }
+
+  /**
+   * Schedule embedding generation through the queue manager
+   */
+  private async scheduleEmbeddingGeneration(): Promise<void> {
+    if (this.embeddingQueueManager) {
+      await this.embeddingQueueManager.scheduleEmbeddingGeneration();
+    }
+  }
+
+  /**
+   * Get embedding queue status for diagnostics
+   */
+  public getEmbeddingQueueStatus(): any {
+    if (this.embeddingQueueManager) {
+      return this.embeddingQueueManager.getQueueStatus();
+    }
+    return {
+      entityQueueSize: 0,
+      observationQueueSize: 0,
+      isScheduled: false,
+      config: null
+    };
+  }
+
   /**
    * Get operation status for diagnostics
    */
@@ -3326,6 +3506,8 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const isHealthy = await this.embeddingService.checkHealth();
       if (!isHealthy) {
         this.logger.warn("Embedding service health check failed, VSS services disabled");
+        // Clean up service instance to ensure isVSSAvailable() returns false
+        this.embeddingService = null;
         return;
       }
 
@@ -3370,6 +3552,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         this.vssManager,
         keywordSearchStrategy
       );
+
+      // Initialize EmbeddingQueueManager
+      await this.initializeEmbeddingQueueManager();
 
       this.logger.info("VSS services initialized successfully");
     } catch (error) {
