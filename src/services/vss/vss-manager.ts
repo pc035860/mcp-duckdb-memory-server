@@ -527,6 +527,7 @@ export class DuckDBVSSManager implements IVSSManager {
         FROM entity_embeddings ee
         JOIN entities e ON ee.name = e.name
         WHERE ee.embedding IS NOT NULL
+          AND len(ee.embedding) > 0
           AND array_cosine_similarity(ee.embedding, $1::FLOAT[]) >= $2
       `;
     } else {
@@ -535,6 +536,7 @@ export class DuckDBVSSManager implements IVSSManager {
                array_cosine_similarity(e.embedding, $1::FLOAT[]) as similarity
         FROM entities e
         WHERE e.embedding IS NOT NULL
+          AND len(e.embedding) > 0
           AND array_cosine_similarity(e.embedding, $1::FLOAT[]) >= $2
       `;
     }
@@ -592,6 +594,7 @@ export class DuckDBVSSManager implements IVSSManager {
       FROM observations o
       JOIN entities e ON o.entityName = e.name
       WHERE o.embedding IS NOT NULL
+        AND len(o.embedding) > 0
         AND array_cosine_similarity(o.embedding, $1::FLOAT[]) >= $2
     `;
 
