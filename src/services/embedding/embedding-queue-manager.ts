@@ -405,6 +405,10 @@ export class EmbeddingQueueManager {
     let embeddingStr: string;
     try {
       const embeddingArray = Array.isArray(embedding) ? embedding : Array.from(embedding);
+      if (embeddingArray.length !== 1536) {
+        this.logger.error("Invalid entity embedding dimension", { entityName, length: embeddingArray.length });
+        throw new Error(`Invalid entity embedding dimension: expected 1536, got ${embeddingArray.length}`);
+      }
       embeddingStr = '[' + embeddingArray.join(',') + ']';
       this.logger.debug("Embedding string conversion", {
         originalType: embedding.constructor.name,
@@ -420,7 +424,7 @@ export class EmbeddingQueueManager {
       // Use auxiliary entity_embeddings table (Strategy C)
       const sqlAux = `
         INSERT INTO entity_embeddings(name, embedding, embedding_model, embedding_updated_at)
-        VALUES ($1, $2::FLOAT[], $3, CURRENT_TIMESTAMP)
+        VALUES ($1, $2::FLOAT[1536], $3, CURRENT_TIMESTAMP)
         ON CONFLICT (name) DO UPDATE SET
           embedding = EXCLUDED.embedding,
           embedding_model = EXCLUDED.embedding_model,
@@ -437,7 +441,7 @@ export class EmbeddingQueueManager {
       // Update entities table directly
       const sql = `
         UPDATE entities 
-        SET embedding = $2::FLOAT[], 
+        SET embedding = $2::FLOAT[1536], 
             embedding_updated_at = CURRENT_TIMESTAMP,
             embedding_model = $3
         WHERE name = $1
@@ -471,6 +475,10 @@ export class EmbeddingQueueManager {
     let embeddingStr: string;
     try {
       const embeddingArray = Array.isArray(embedding) ? embedding : Array.from(embedding);
+      if (embeddingArray.length !== 1536) {
+        this.logger.error("Invalid observation embedding dimension", { observationId, length: embeddingArray.length });
+        throw new Error(`Invalid observation embedding dimension: expected 1536, got ${embeddingArray.length}`);
+      }
       embeddingStr = '[' + embeddingArray.join(',') + ']';
       this.logger.debug("Observation embedding string conversion", {
         originalType: embedding.constructor.name,

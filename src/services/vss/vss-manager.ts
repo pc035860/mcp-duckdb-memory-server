@@ -1,4 +1,4 @@
-import type { Database, Connection } from 'duckdb';
+import type { DuckDBConnection } from '@duckdb/node-api';
 import type {
   IVSSManager,
   VSSConfig,
@@ -11,10 +11,11 @@ import type {
 import { VSSError } from '../../types/vss.js';
 import type { EmbeddingVector, IEmbeddingService } from '../../types/embedding.js';
 import type { Entity } from '../../types.js';
+import { getModelDimensions } from '../embedding/index.js';
 import { logger } from '../../logger.js';
 
 export class DuckDBVSSManager implements IVSSManager {
-  private connection: Connection;
+  private connection: DuckDBConnection;
   private embeddingService: IEmbeddingService;
   private config: VSSConfig;
   private extensionLoaded: boolean = false;
@@ -27,9 +28,11 @@ export class DuckDBVSSManager implements IVSSManager {
     hybridSearches: 0,
     totalLatency: 0,
   };
+  // If true, send embedding as string parameter ("[v1,...]") to work around binder issues
+  private fallbackToStringParam: boolean = false;
 
   constructor(
-    connection: Connection,
+    connection: DuckDBConnection,
     embeddingService: IEmbeddingService,
     config: VSSConfig
   ) {
@@ -119,6 +122,18 @@ export class DuckDBVSSManager implements IVSSManager {
     options: VSSSearchOptions = {}
   ): Promise<VSSSearchResult[]> {
     const startTime = Date.now();
+    // Runtime guard: ensure query embedding has expected dimension
+    const expectedDim = this.getExpectedEmbeddingDimension();
+    const embeddingLength = (queryEmbedding as any)?.length;
+    if (!queryEmbedding || embeddingLength !== expectedDim) {
+      logger.error('Invalid query embedding dimension', { expectedDim, length: embeddingLength });
+      throw new (VSSError as any)(
+        `Invalid query embedding dimension: expected ${expectedDim}, got ${embeddingLength}`,
+        'EMBEDDING_DIMENSION_MISMATCH',
+        true,
+        false
+      );
+    }
     
     if (!this.isEnabled()) {
       throw new (VSSError as any)(
@@ -138,55 +153,86 @@ export class DuckDBVSSManager implements IVSSManager {
       searchTarget = 'both',
     } = options;
 
-    try {
-      let results: VSSSearchResult[] = [];
+    // Try with current parameter mode; if binder error due to FLOAT[] mismatch occurs, fallback once
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        let results: VSSSearchResult[] = [];
 
-      // 搜尋實體
-      if (searchTarget === 'entities' || searchTarget === 'both') {
-        const entityResults = await this.searchEntitiesWithVSS(
-          queryEmbedding,
-          { threshold, limit: Math.ceil(limit / 2), scope, timeRange, includeEmbeddings }
+        // 搜尋實體
+        if (searchTarget === 'entities' || searchTarget === 'both') {
+          const entityResults = await this.searchEntitiesWithVSS(
+            queryEmbedding,
+            { threshold, limit: Math.ceil(limit / 2), scope, timeRange, includeEmbeddings }
+          );
+          results.push(...entityResults);
+        }
+
+        // 搜尋觀察
+        if (searchTarget === 'observations' || searchTarget === 'both') {
+          const observationResults = await this.searchObservationsWithVSS(
+            queryEmbedding,
+            { threshold, limit: Math.ceil(limit / 2), scope, timeRange, includeEmbeddings }
+          );
+          results.push(...observationResults);
+        }
+
+        // 按相似度排序並限制結果數量
+        results = results
+          .sort((a, b) => b.similarity - a.similarity)
+          .slice(0, limit);
+
+        // 更新統計
+        const latency = Date.now() - startTime;
+        this.updateSearchStats('semantic', latency);
+
+        logger.debug('VSS search completed', {
+          queryDimension: queryEmbedding.length,
+          threshold,
+          limit,
+          searchTarget,
+          resultsCount: results.length,
+          latency,
+          paramMode: this.fallbackToStringParam ? 'string' : 'array',
+        });
+
+        return results;
+      } catch (error: any) {
+        lastError = error;
+        const message = (error && (error.message || String(error))) as string;
+        const isBinderArrayMismatch =
+          typeof message === 'string' &&
+          message.includes('No function matches the given name') &&
+          message.includes('array_cosine_similarity') &&
+          message.includes('FLOAT[]');
+
+        if (!this.fallbackToStringParam && isBinderArrayMismatch) {
+          this.fallbackToStringParam = true;
+          logger.warn('VSS query param fallback to string casting', {
+            reason: 'Binder mismatch with FLOAT[]',
+            model: this.embeddingService.getConfig().model,
+            expectedDim,
+          });
+          continue; // retry once with string parameter mode
+        }
+
+        logger.error('VSS search failed', { error, options });
+        throw new (VSSError as any)(
+          `VSS search failed: ${error}`,
+          'VSS_SEARCH_FAILED',
+          true,
+          true
         );
-        results.push(...entityResults);
       }
-
-      // 搜尋觀察
-      if (searchTarget === 'observations' || searchTarget === 'both') {
-        const observationResults = await this.searchObservationsWithVSS(
-          queryEmbedding,
-          { threshold, limit: Math.ceil(limit / 2), scope, timeRange, includeEmbeddings }
-        );
-        results.push(...observationResults);
-      }
-
-      // 按相似度排序並限制結果數量
-      results = results
-        .sort((a, b) => b.similarity - a.similarity)
-        .slice(0, limit);
-
-      // 更新統計
-      const latency = Date.now() - startTime;
-      this.updateSearchStats('semantic', latency);
-
-      logger.debug('VSS search completed', {
-        queryDimension: queryEmbedding.length,
-        threshold,
-        limit,
-        searchTarget,
-        resultsCount: results.length,
-        latency,
-      });
-
-      return results;
-    } catch (error) {
-      logger.error('VSS search failed', { error, options });
-      throw new (VSSError as any)(
-        `VSS search failed: ${error}`,
-        'VSS_SEARCH_FAILED',
-        true,
-        true
-      );
     }
+
+    // Shouldn't reach here; throw last error as fallback
+    throw new (VSSError as any)(
+      `VSS search failed: ${lastError}`,
+      'VSS_SEARCH_FAILED',
+      true,
+      true
+    );
   }
 
   async updateEntityEmbeddings(entityNames: string[]): Promise<void> {
@@ -523,25 +569,25 @@ export class DuckDBVSSManager implements IVSSManager {
     if (useAux) {
       sql = `
         SELECT e.name, e.entityType, e.observations, e.createdAt, ee.embedding,
-               array_cosine_similarity(ee.embedding, $1::FLOAT[]) as similarity
+               array_cosine_similarity(ee.embedding, $1::FLOAT[1536]) as similarity
         FROM entity_embeddings ee
         JOIN entities e ON ee.name = e.name
         WHERE ee.embedding IS NOT NULL
           AND len(ee.embedding) > 0
-          AND array_cosine_similarity(ee.embedding, $1::FLOAT[]) >= $2
+          AND array_cosine_similarity(ee.embedding, $1::FLOAT[1536]) >= $2
       `;
     } else {
       sql = `
         SELECT e.name, e.entityType, e.observations, e.createdAt, e.embedding,
-               array_cosine_similarity(e.embedding, $1::FLOAT[]) as similarity
+               array_cosine_similarity(e.embedding, $1::FLOAT[1536]) as similarity
         FROM entities e
         WHERE e.embedding IS NOT NULL
           AND len(e.embedding) > 0
-          AND array_cosine_similarity(e.embedding, $1::FLOAT[]) >= $2
+          AND array_cosine_similarity(e.embedding, $1::FLOAT[1536]) >= $2
       `;
     }
 
-    const params: any[] = [queryEmbedding, options.threshold || 0.7];
+    const params: any[] = [this.formatEmbeddingParam(queryEmbedding), options.threshold || 0.7];
     let paramIndex = 2;
 
     // 添加 scope 過濾
@@ -590,15 +636,15 @@ export class DuckDBVSSManager implements IVSSManager {
     let sql = `
       SELECT o.entityName, o.content, o.createdAt, o.embedding,
              e.entityType, e.observations,
-             array_cosine_similarity(o.embedding, $1::FLOAT[]) as similarity
+             array_cosine_similarity(o.embedding, $1::FLOAT[1536]) as similarity
       FROM observations o
       JOIN entities e ON o.entityName = e.name
       WHERE o.embedding IS NOT NULL
         AND len(o.embedding) > 0
-        AND array_cosine_similarity(o.embedding, $1::FLOAT[]) >= $2
+        AND array_cosine_similarity(o.embedding, $1::FLOAT[1536]) >= $2
     `;
 
-    const params: any[] = [queryEmbedding, options.threshold || 0.7];
+    const params: any[] = [this.formatEmbeddingParam(queryEmbedding), options.threshold || 0.7];
     let paramIndex = 2;
 
     // 添加相同的過濾邏輯
@@ -632,6 +678,23 @@ export class DuckDBVSSManager implements IVSSManager {
     }
   }
 
+  private getExpectedEmbeddingDimension(): number {
+    try {
+      const model = this.embeddingService.getConfig().model;
+      return getModelDimensions(model);
+    } catch {
+      return 1536;
+    }
+  }
+
+  private formatEmbeddingParam(embedding: EmbeddingVector): any {
+    if (!this.fallbackToStringParam) {
+      return embedding;
+    }
+    const embeddingArray = Array.isArray(embedding) ? embedding : Array.from(embedding);
+    return '[' + embeddingArray.join(',') + ']';
+  }
+
   private async processBatchEntityEmbeddings(entityNames: string[]): Promise<void> {
     // 獲取實體資料
     const entities = await this.getEntitiesByNames(entityNames);
@@ -660,10 +723,15 @@ export class DuckDBVSSManager implements IVSSManager {
 
   private async updateEntityEmbeddingInDB(entityName: string, embedding: EmbeddingVector): Promise<void> {
     const useAux = await this.isEntityEmbeddingsAvailable();
+    // Runtime guard: ensure embedding dimension is correct before write
+    if (!embedding || (embedding as any).length !== 1536) {
+      logger.error('Invalid entity embedding dimension', { length: (embedding as any)?.length, entityName });
+      throw new Error(`Invalid entity embedding dimension: expected 1536, got ${(embedding as any)?.length}`);
+    }
     if (useAux) {
       const sqlAux = `
         INSERT INTO entity_embeddings(name, embedding, embedding_model, embedding_updated_at)
-        VALUES ($2, $1::FLOAT[], $3, CURRENT_TIMESTAMP)
+        VALUES ($2, $1::FLOAT[1536], $3, CURRENT_TIMESTAMP)
         ON CONFLICT (name) DO UPDATE SET
           embedding = EXCLUDED.embedding,
           embedding_model = EXCLUDED.embedding_model,
@@ -677,7 +745,7 @@ export class DuckDBVSSManager implements IVSSManager {
     } else {
       const sql = `
         UPDATE entities 
-        SET embedding = $1::FLOAT[], 
+        SET embedding = $1::FLOAT[1536], 
             embedding_updated_at = CURRENT_TIMESTAMP,
             embedding_model = $3
         WHERE name = $2
