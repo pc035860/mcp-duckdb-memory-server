@@ -109,6 +109,30 @@ src/
 - 使用 prepared statements 提升效能
 - 實體名稱使用小寫以確保一致性
 
+### 向量搜尋（VSS）與 Embeddings（Strategy C）
+- 實體向量的單一真相（SoT）改為 `entity_embeddings` 外掛表。
+- 系統會自動偵測該表是否存在；若存在則：
+  - 搜尋來源：JOIN `entity_embeddings` → `entities`
+  - HNSW 索引：`entity_embeddings_embedding_idx`
+  - 統計/健康檢查：基於 `entity_embeddings`
+  - 寫入/清理：優先操作 `entity_embeddings`
+- 新增實體時，會 upsert 佔位列到 `entity_embeddings`（embedding 可稍後補齊）。
+
+#### Backfill 工具使用
+```bash
+# 建議以 Strategy C 執行 entities backfill
+BACKFILL_TARGET=entities \
+BACKFILL_ENTITIES_WORKAROUND=strategyC \
+OPENAI_API_KEY=$OPENAI_API_KEY \
+node dist/tools/backfill-embeddings.mjs
+```
+
+#### 檢查
+```sql
+SELECT COUNT(*) FROM entity_embeddings;
+SELECT e.name FROM entities e JOIN entity_embeddings ee ON ee.name = e.name LIMIT 5;
+```
+
 ### FTS（全文搜尋）功能
 - **DuckDB FTS 擴展**：自動載入並啟用 BM25 搜尋算法
 - **混合搜尋策略**：

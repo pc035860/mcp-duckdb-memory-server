@@ -20,6 +20,7 @@ export class DuckDBVSSManager implements IVSSManager {
   private extensionLoaded: boolean = false;
   private indexesCreated: boolean = false;
   private lastHealthCheck: VSSHealthCheck | null = null;
+  private entityEmbeddingsAvailable: boolean | null = null; // cache detection
   private searchStats = {
     totalSearches: 0,
     semanticSearches: 0,
@@ -82,10 +83,17 @@ export class DuckDBVSSManager implements IVSSManager {
     try {
       // 檢查現有索引
       const existingIndexes = await this.getExistingIndexes();
+      const useAux = await this.isEntityEmbeddingsAvailable();
       
-      // 為 entities 表建立 HNSW 索引
-      if (!existingIndexes.some(idx => idx.name === 'entities_embedding_idx')) {
-        await this.createEntityEmbeddingIndex();
+      // 為 entities or entity_embeddings 建立 HNSW 索引
+      if (useAux) {
+        if (!existingIndexes.some(idx => idx.name === 'entity_embeddings_embedding_idx')) {
+          await this.createAuxEntityEmbeddingIndex();
+        }
+      } else {
+        if (!existingIndexes.some(idx => idx.name === 'entities_embedding_idx')) {
+          await this.createEntityEmbeddingIndex();
+        }
       }
 
       // 為 observations 表建立 HNSW 索引  
@@ -385,42 +393,151 @@ export class DuckDBVSSManager implements IVSSManager {
   }
 
   private async createEntityEmbeddingIndex(): Promise<void> {
-    const sql = `
-      CREATE INDEX entities_embedding_idx ON entities 
-      USING HNSW (embedding) 
-      WITH (metric = '${this.config.indexParams.metric}', 
-            ef_construction = ${this.config.indexParams.efConstruction}, 
-            M = ${this.config.indexParams.M});
-    `;
+    const indexName = 'entities_embedding_idx';
     
-    await this.executeQuery(sql);
-    logger.debug('Entity embedding HNSW index created');
+    try {
+      // 檢查索引是否已存在
+      const existingIndexes = await this.getExistingIndexes();
+      const indexExists = existingIndexes.some(index => index.name === indexName);
+      
+      if (indexExists) {
+        logger.debug(`HNSW index ${indexName} already exists, skipping creation`);
+        return;
+      }
+      
+      // 創建 HNSW 索引
+      const sql = `
+        CREATE INDEX ${indexName} ON entities 
+        USING HNSW (embedding) 
+        WITH (metric = '${this.config.indexParams.metric}', 
+              ef_construction = ${this.config.indexParams.efConstruction}, 
+              M = ${this.config.indexParams.M});
+      `;
+      
+      logger.debug(`Creating HNSW index ${indexName} for entities...`);
+      await this.executeQuery(sql);
+      logger.info(`HNSW index ${indexName} created successfully`);
+      
+    } catch (error) {
+      // 如果錯誤是索引已存在，則視為成功（雙重保護）
+      if (error instanceof Error && error.message.includes('already exists')) {
+        logger.debug(`HNSW index ${indexName} already exists (detected in catch), continuing...`);
+        return;
+      }
+      
+      logger.error(`Failed to create HNSW index ${indexName}`, { 
+        error: error instanceof Error ? error.message : String(error),
+        indexName,
+        metric: this.config.indexParams.metric,
+        efConstruction: this.config.indexParams.efConstruction,
+        M: this.config.indexParams.M
+      });
+      throw new Error(`Failed to create entity embedding HNSW index: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async createAuxEntityEmbeddingIndex(): Promise<void> {
+    const indexName = 'entity_embeddings_embedding_idx';
+    try {
+      const existingIndexes = await this.getExistingIndexes();
+      const indexExists = existingIndexes.some(index => index.name === indexName);
+      if (indexExists) {
+        logger.debug(`HNSW index ${indexName} already exists, skipping creation`);
+        return;
+      }
+
+      const sql = `
+        CREATE INDEX ${indexName} ON entity_embeddings 
+        USING HNSW (embedding) 
+        WITH (metric = '${this.config.indexParams.metric}', 
+              ef_construction = ${this.config.indexParams.efConstruction}, 
+              M = ${this.config.indexParams.M});
+      `;
+
+      logger.debug(`Creating HNSW index ${indexName} for entity_embeddings...`);
+      await this.executeQuery(sql);
+      logger.info(`HNSW index ${indexName} created successfully`);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('already exists')) {
+        logger.debug(`HNSW index ${indexName} already exists (detected in catch), continuing...`);
+        return;
+      }
+      logger.error(`Failed to create HNSW index ${indexName}`, { 
+        error: error instanceof Error ? error.message : String(error),
+        indexName,
+      });
+      throw new Error(`Failed to create entity_embeddings HNSW index: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async createObservationEmbeddingIndex(): Promise<void> {
-    const sql = `
-      CREATE INDEX observations_embedding_idx ON observations 
-      USING HNSW (embedding) 
-      WITH (metric = '${this.config.indexParams.metric}', 
-            ef_construction = ${this.config.indexParams.efConstruction}, 
-            M = ${this.config.indexParams.M});
-    `;
+    const indexName = 'observations_embedding_idx';
     
-    await this.executeQuery(sql);
-    logger.debug('Observation embedding HNSW index created');
+    try {
+      // 檢查索引是否已存在
+      const existingIndexes = await this.getExistingIndexes();
+      const indexExists = existingIndexes.some(index => index.name === indexName);
+      
+      if (indexExists) {
+        logger.debug(`HNSW index ${indexName} already exists, skipping creation`);
+        return;
+      }
+      
+      // 創建 HNSW 索引
+      const sql = `
+        CREATE INDEX ${indexName} ON observations 
+        USING HNSW (embedding) 
+        WITH (metric = '${this.config.indexParams.metric}', 
+              ef_construction = ${this.config.indexParams.efConstruction}, 
+              M = ${this.config.indexParams.M});
+      `;
+      
+      logger.debug(`Creating HNSW index ${indexName} for observations...`);
+      await this.executeQuery(sql);
+      logger.info(`HNSW index ${indexName} created successfully`);
+      
+    } catch (error) {
+      // 如果錯誤是索引已存在，則視為成功（雙重保護）
+      if (error instanceof Error && error.message.includes('already exists')) {
+        logger.debug(`HNSW index ${indexName} already exists (detected in catch), continuing...`);
+        return;
+      }
+      
+      logger.error(`Failed to create HNSW index ${indexName}`, { 
+        error: error instanceof Error ? error.message : String(error),
+        indexName,
+        metric: this.config.indexParams.metric,
+        efConstruction: this.config.indexParams.efConstruction,
+        M: this.config.indexParams.M
+      });
+      throw new Error(`Failed to create observation embedding HNSW index: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async searchEntitiesWithVSS(
     queryEmbedding: EmbeddingVector,
     options: VSSSearchOptions
   ): Promise<VSSSearchResult[]> {
-    let sql = `
-      SELECT e.name, e.entityType, e.observations, e.createdAt, e.embedding,
-             array_cosine_similarity(e.embedding, $1::FLOAT[]) as similarity
-      FROM entities e
-      WHERE e.embedding IS NOT NULL
-        AND array_cosine_similarity(e.embedding, $1::FLOAT[]) >= $2
-    `;
+    const useAux = await this.isEntityEmbeddingsAvailable();
+    let sql = '';
+    if (useAux) {
+      sql = `
+        SELECT e.name, e.entityType, e.observations, e.createdAt, ee.embedding,
+               array_cosine_similarity(ee.embedding, $1::FLOAT[]) as similarity
+        FROM entity_embeddings ee
+        JOIN entities e ON ee.name = e.name
+        WHERE ee.embedding IS NOT NULL
+          AND array_cosine_similarity(ee.embedding, $1::FLOAT[]) >= $2
+      `;
+    } else {
+      sql = `
+        SELECT e.name, e.entityType, e.observations, e.createdAt, e.embedding,
+               array_cosine_similarity(e.embedding, $1::FLOAT[]) as similarity
+        FROM entities e
+        WHERE e.embedding IS NOT NULL
+          AND array_cosine_similarity(e.embedding, $1::FLOAT[]) >= $2
+      `;
+    }
 
     const params: any[] = [queryEmbedding, options.threshold || 0.7];
     let paramIndex = 2;
@@ -539,19 +656,35 @@ export class DuckDBVSSManager implements IVSSManager {
   }
 
   private async updateEntityEmbeddingInDB(entityName: string, embedding: EmbeddingVector): Promise<void> {
-    const sql = `
-      UPDATE entities 
-      SET embedding = $1::FLOAT[], 
-          embedding_updated_at = CURRENT_TIMESTAMP,
-          embedding_model = $3
-      WHERE name = $2
-    `;
-    
-    await this.executeQuery(sql, [
-      embedding, 
-      entityName, 
-      this.embeddingService.getConfig().model
-    ]);
+    const useAux = await this.isEntityEmbeddingsAvailable();
+    if (useAux) {
+      const sqlAux = `
+        INSERT INTO entity_embeddings(name, embedding, embedding_model, embedding_updated_at)
+        VALUES ($2, $1::FLOAT[], $3, CURRENT_TIMESTAMP)
+        ON CONFLICT (name) DO UPDATE SET
+          embedding = EXCLUDED.embedding,
+          embedding_model = EXCLUDED.embedding_model,
+          embedding_updated_at = EXCLUDED.embedding_updated_at
+      `;
+      await this.executeQuery(sqlAux, [
+        embedding,
+        entityName,
+        this.embeddingService.getConfig().model
+      ]);
+    } else {
+      const sql = `
+        UPDATE entities 
+        SET embedding = $1::FLOAT[], 
+            embedding_updated_at = CURRENT_TIMESTAMP,
+            embedding_model = $3
+        WHERE name = $2
+      `;
+      await this.executeQuery(sql, [
+        embedding, 
+        entityName, 
+        this.embeddingService.getConfig().model
+      ]);
+    }
   }
 
   private async getEntitiesByNames(names: string[]): Promise<Entity[]> {
@@ -590,52 +723,186 @@ export class DuckDBVSSManager implements IVSSManager {
 
   private async getExistingIndexes(): Promise<Array<{ name: string }>> {
     try {
+      // 使用更簡單可靠的查詢方式
       const result = await this.executeQuery(`
         SELECT index_name as name 
         FROM duckdb_indexes() 
         WHERE index_name LIKE '%embedding%'
       `);
       
-      // 轉換 DuckDB 結果為陣列格式
+      // 使用標準陣列格式處理結果（與其他地方保持一致）
       const indexes: Array<{ name: string }> = [];
-      if (result && result.numRows > 0) {
-        const nameColumn = result.getChild('name');
-        for (let i = 0; i < result.numRows; i++) {
-          const name = nameColumn?.get(i);
-          if (name) {
-            indexes.push({ name });
+      
+      if (result && typeof result.getRows === 'function') {
+        // DuckDB result format with getRows() method
+        const rows = result.getRows();
+        for (const row of rows) {
+          if (row && row.length > 0 && row[0]) {
+            indexes.push({ name: row[0] });
+          }
+        }
+      } else if (result && Array.isArray(result)) {
+        // Direct array result format
+        for (const row of result) {
+          if (row && row.name) {
+            indexes.push({ name: row.name });
           }
         }
       }
       
+      logger.debug(`Found existing indexes: ${indexes.map(i => i.name).join(', ') || 'none'}`);
       return indexes;
     } catch (error) {
-      logger.debug('Failed to get existing indexes, assuming none exist', { error });
-      return [];
+      logger.error('Failed to get existing indexes, will attempt individual checks', { error });
+      
+      // 改用個別檢查的方式，更可靠
+      return await this.checkIndexesIndividually();
     }
   }
 
+  private async checkIndexesIndividually(): Promise<Array<{ name: string }>> {
+    const indexesToCheck = ['entities_embedding_idx', 'observations_embedding_idx'];
+    const existingIndexes: Array<{ name: string }> = [];
+    
+    for (const indexName of indexesToCheck) {
+      try {
+        // 使用更直接的查詢方式
+        const result = await this.executeQuery(`
+          SELECT 1 FROM duckdb_indexes() WHERE index_name = $1
+        `, [indexName]);
+        
+        // 如果查詢有結果，表示索引存在
+        const hasResult = result && (
+          (typeof result.getRows === 'function' && result.getRows().length > 0) ||
+          (Array.isArray(result) && result.length > 0)
+        );
+        
+        if (hasResult) {
+          existingIndexes.push({ name: indexName });
+          logger.debug(`Index ${indexName} exists`);
+        } else {
+          logger.debug(`Index ${indexName} does not exist`);
+        }
+      } catch (error) {
+        logger.debug(`Failed to check index ${indexName}, assuming it doesn't exist`, { error });
+      }
+    }
+    
+    return existingIndexes;
+  }
+
   private async getIndexStatuses(): Promise<VSSIndexStatus[]> {
-    // 簡化實現，實際應檢查每個索引的詳細狀態
-    return [
-      {
-        name: 'entities_embedding_idx',
-        table: 'entities',
-        column: 'embedding',
-        indexType: 'HNSW',
-        metric: this.config.indexParams.metric,
-        dimensions: 1536, // TODO: 從配置獲取
-        totalVectors: await this.countEntitiesWithEmbeddings(),
-        parameters: this.config.indexParams,
-        isHealthy: true,
-        lastUpdated: new Date().toISOString(),
-      },
-    ];
+    const statuses: VSSIndexStatus[] = [];
+    
+    try {
+      const existingIndexes = await this.getExistingIndexes();
+      logger.debug(`Found ${existingIndexes.length} VSS indexes for health check`);
+      const useAux = await this.isEntityEmbeddingsAvailable();
+      
+      // 檢查 entity 向量索引（aux 優先）
+      if (useAux) {
+        const auxIndexExists = existingIndexes.some(idx => idx.name === 'entity_embeddings_embedding_idx');
+        if (auxIndexExists) {
+          const entityCount = await this.countEntitiesWithEmbeddings();
+          const totalEntities = await this.countTotalEntities();
+          statuses.push({
+            name: 'entity_embeddings_embedding_idx',
+            table: 'entity_embeddings',
+            column: 'embedding',
+            indexType: 'HNSW',
+            metric: this.config.indexParams.metric,
+            dimensions: 1536,
+            totalVectors: entityCount,
+            parameters: {
+              ...this.config.indexParams,
+              coverage: totalEntities > 0 ? (entityCount / totalEntities * 100).toFixed(1) + '%' : '0%',
+              totalRows: totalEntities,
+            },
+            isHealthy: await this.checkIndexHealth('entity_embeddings_embedding_idx', 'entity_embeddings'),
+            lastUpdated: new Date().toISOString(),
+          });
+        }
+      } else {
+        const entitiesIndexExists = existingIndexes.some(idx => idx.name === 'entities_embedding_idx');
+        if (entitiesIndexExists) {
+          const entityCount = await this.countEntitiesWithEmbeddings();
+          const totalEntities = await this.countTotalEntities();
+          statuses.push({
+            name: 'entities_embedding_idx',
+            table: 'entities',
+            column: 'embedding',
+            indexType: 'HNSW',
+            metric: this.config.indexParams.metric,
+            dimensions: 1536,
+            totalVectors: entityCount,
+            parameters: {
+              ...this.config.indexParams,
+              coverage: totalEntities > 0 ? (entityCount / totalEntities * 100).toFixed(1) + '%' : '0%',
+              totalRows: totalEntities,
+            },
+            isHealthy: await this.checkIndexHealth('entities_embedding_idx', 'entities'),
+            lastUpdated: new Date().toISOString(),
+          });
+        }
+      }
+      
+      // 檢查 observations 索引
+      const observationsIndexExists = existingIndexes.some(idx => idx.name === 'observations_embedding_idx');
+      if (observationsIndexExists) {
+        const observationCount = await this.countObservationsWithEmbeddings();
+        const totalObservations = await this.countTotalObservations();
+        
+        statuses.push({
+          name: 'observations_embedding_idx',
+          table: 'observations',
+          column: 'embedding',
+          indexType: 'HNSW',
+          metric: this.config.indexParams.metric,
+          dimensions: 1536,
+          totalVectors: observationCount,
+          parameters: {
+            ...this.config.indexParams,
+            coverage: totalObservations > 0 ? (observationCount / totalObservations * 100).toFixed(1) + '%' : '0%',
+            totalRows: totalObservations,
+          },
+          isHealthy: await this.checkIndexHealth('observations_embedding_idx', 'observations'),
+          lastUpdated: new Date().toISOString(),
+        });
+      }
+      
+      logger.debug(`Generated ${statuses.length} index status reports`);
+      return statuses;
+      
+    } catch (error) {
+      logger.error('Failed to get comprehensive index statuses', { error });
+      
+      // 降級到簡化版本，提供基本資訊
+      return [
+        {
+          name: 'entities_embedding_idx',
+          table: 'entities',
+          column: 'embedding',
+          indexType: 'HNSW',
+          metric: this.config.indexParams.metric,
+          dimensions: 1536,
+          totalVectors: await this.countEntitiesWithEmbeddings().catch(() => 0),
+          parameters: { ...this.config.indexParams, error: 'Status check failed' },
+          isHealthy: false,
+          lastUpdated: new Date().toISOString(),
+        },
+      ];
+    }
   }
 
   private async countEntitiesWithEmbeddings(): Promise<number> {
-    const result = await this.executeQuery('SELECT COUNT(*) as count FROM entities WHERE embedding IS NOT NULL');
-    return result[0]?.count || 0;
+    const useAux = await this.isEntityEmbeddingsAvailable();
+    if (useAux) {
+      const result = await this.executeQuery('SELECT COUNT(*) as count FROM entity_embeddings WHERE embedding IS NOT NULL');
+      return result[0]?.count || 0;
+    } else {
+      const result = await this.executeQuery('SELECT COUNT(*) as count FROM entities WHERE embedding IS NOT NULL');
+      return result[0]?.count || 0;
+    }
   }
 
   private async countObservationsWithEmbeddings(): Promise<number> {
@@ -653,8 +920,173 @@ export class DuckDBVSSManager implements IVSSManager {
     return result[0]?.count || 0;
   }
 
+  private async checkIndexHealth(indexName: string, tableName: string): Promise<boolean> {
+    try {
+      // 檢查索引是否存在於系統表中
+      const indexExists = await this.executeQuery(`
+        SELECT 1 FROM duckdb_indexes() 
+        WHERE index_name = $1 AND table_name = $2
+      `, [indexName, tableName]);
+      
+      if (!indexExists || (Array.isArray(indexExists) && indexExists.length === 0)) {
+        logger.debug(`Index ${indexName} does not exist in system catalog`);
+        return false;
+      }
+      
+      // 嘗試使用索引執行簡單查詢來驗證索引功能
+      const testQuery = tableName === 'entities' 
+        ? 'SELECT COUNT(*) FROM entities WHERE embedding IS NOT NULL LIMIT 1'
+        : 'SELECT COUNT(*) FROM observations WHERE embedding IS NOT NULL LIMIT 1';
+      
+      await this.executeQuery(testQuery);
+      
+      logger.debug(`Index ${indexName} health check passed`);
+      return true;
+      
+    } catch (error) {
+      logger.warn(`Index ${indexName} health check failed`, { 
+        error: error instanceof Error ? error.message : String(error),
+        indexName,
+        tableName 
+      });
+      return false;
+    }
+  }
+
+  /**
+   * 獲取詳細的 VSS 診斷資訊，用於故障排查
+   */
+  async getVSSDiagnostics(): Promise<{
+    systemInfo: Record<string, any>;
+    indexInfo: Array<{ name: string; exists: boolean; details?: any; error?: string }>;
+    embeddingStats: Record<string, number>;
+    recommendations: string[];
+    issues: string[];
+  }> {
+    const diagnostics = {
+      systemInfo: {},
+      indexInfo: [],
+      embeddingStats: {},
+      recommendations: [],
+      issues: [],
+    } as any;
+
+    try {
+      // 系統資訊
+      diagnostics.systemInfo = {
+        vssEnabled: this.config.enabled,
+        vssConfig: this.config,
+        extensionLoaded: await this.checkVSSExtension(),
+        timestamp: new Date().toISOString(),
+      };
+
+      // 檢查所有預期的索引
+      const expectedIndexes = [
+        { name: 'entities_embedding_idx', table: 'entities' },
+        { name: 'observations_embedding_idx', table: 'observations' },
+      ];
+
+      for (const { name, table } of expectedIndexes) {
+        try {
+          const exists = await this.checkIndexHealth(name, table);
+          const details: any = { table, exists };
+
+          if (exists) {
+            // 獲取索引詳細資訊
+            const indexDetails = await this.executeQuery(`
+              SELECT index_name, table_name, is_unique, sql 
+              FROM duckdb_indexes() 
+              WHERE index_name = $1
+            `, [name]).catch(() => null);
+
+            if (indexDetails && indexDetails.length > 0) {
+              details.indexDetails = indexDetails[0];
+            }
+          }
+
+          diagnostics.indexInfo.push({ name, exists, details });
+
+        } catch (error) {
+          diagnostics.indexInfo.push({
+            name,
+            exists: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      // 嵌入統計
+      try {
+        const [entitiesWithEmbeddings, totalEntities, observationsWithEmbeddings, totalObservations] =
+          await Promise.all([
+            this.countEntitiesWithEmbeddings(),
+            this.countTotalEntities(),
+            this.countObservationsWithEmbeddings(),
+            this.countTotalObservations(),
+          ]);
+
+        diagnostics.embeddingStats = {
+          entitiesWithEmbeddings,
+          totalEntities,
+          entitiesCoverage: totalEntities > 0 ? (entitiesWithEmbeddings / totalEntities * 100) : 0,
+          observationsWithEmbeddings,
+          totalObservations,
+          observationsCoverage: totalObservations > 0 ? (observationsWithEmbeddings / totalObservations * 100) : 0,
+        };
+
+        // 生成建議
+        if (entitiesWithEmbeddings === 0 && totalEntities > 0) {
+          diagnostics.recommendations.push('建議執行 embedding backfill 工具為現有實體生成向量');
+        }
+
+        if (observationsWithEmbeddings === 0 && totalObservations > 0) {
+          diagnostics.recommendations.push('建議執行 embedding backfill 工具為現有觀察生成向量');
+        }
+
+        const totalVectors = entitiesWithEmbeddings + observationsWithEmbeddings;
+        if (totalVectors > 0) {
+          const recommendedParams = this.recommendHNSWParameters(totalVectors);
+          if (
+            this.config.indexParams.efConstruction !== recommendedParams.efConstruction ||
+            this.config.indexParams.M !== recommendedParams.M
+          ) {
+            diagnostics.recommendations.push(
+              `根據 ${totalVectors} 個向量，建議使用 HNSW 參數：efConstruction=${recommendedParams.efConstruction}, M=${recommendedParams.M}`
+            );
+          }
+        }
+
+      } catch (error) {
+        diagnostics.issues.push(`無法獲取嵌入統計：${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      // 系統健康檢查問題
+      const healthCheck = await this.checkHealth();
+      if (healthCheck.issues.length > 0) {
+        diagnostics.issues.push(...healthCheck.issues);
+      }
+
+      return diagnostics;
+
+    } catch (error) {
+      logger.error('VSS diagnostics failed', { error });
+      diagnostics.issues.push(`診斷程序失敗：${error instanceof Error ? error.message : String(error)}`);
+      return diagnostics;
+    }
+  }
+
+  private recommendHNSWParameters(vectorCount: number): { efConstruction: number; M: number } {
+    if (vectorCount < 10000) {
+      return { efConstruction: 100, M: 8 };
+    } else if (vectorCount < 100000) {
+      return { efConstruction: 200, M: 16 };
+    } else {
+      return { efConstruction: 400, M: 32 };
+    }
+  }
+
   private async dropExistingIndexes(): Promise<void> {
-    const indexes = ['entities_embedding_idx', 'observations_embedding_idx'];
+    const indexes = ['entities_embedding_idx', 'entity_embeddings_embedding_idx', 'observations_embedding_idx'];
     
     for (const indexName of indexes) {
       try {
@@ -666,12 +1098,22 @@ export class DuckDBVSSManager implements IVSSManager {
   }
 
   private async cleanupInvalidEntityEmbeddings(): Promise<void> {
-    await this.executeQuery(`
-      UPDATE entities 
-      SET embedding = NULL, embedding_updated_at = NULL 
-      WHERE embedding IS NOT NULL 
-        AND (array_length(embedding, 1) = 0 OR embedding IS NULL)
-    `);
+    const useAux = await this.isEntityEmbeddingsAvailable();
+    if (useAux) {
+      await this.executeQuery(`
+        UPDATE entity_embeddings 
+        SET embedding = NULL, embedding_updated_at = NULL 
+        WHERE embedding IS NOT NULL 
+          AND (array_length(embedding, 1) = 0 OR embedding IS NULL)
+      `);
+    } else {
+      await this.executeQuery(`
+        UPDATE entities 
+        SET embedding = NULL, embedding_updated_at = NULL 
+        WHERE embedding IS NOT NULL 
+          AND (array_length(embedding, 1) = 0 OR embedding IS NULL)
+      `);
+    }
   }
 
   private async cleanupInvalidObservationEmbeddings(): Promise<void> {
@@ -701,6 +1143,21 @@ export class DuckDBVSSManager implements IVSSManager {
     } catch (error) {
       logger.error('VSS query execution failed', { sql, params, error });
       throw error;
+    }
+  }
+
+  private async isEntityEmbeddingsAvailable(): Promise<boolean> {
+    if (this.entityEmbeddingsAvailable !== null) return this.entityEmbeddingsAvailable;
+    try {
+      const rows = await this.executeQuery(`
+        SELECT 1 FROM duckdb_tables() WHERE table_name = 'entity_embeddings' LIMIT 1
+      `);
+      const exists = Array.isArray(rows) ? rows.length > 0 : (typeof rows.getRows === 'function' ? rows.getRows().length > 0 : false);
+      this.entityEmbeddingsAvailable = exists;
+      return exists;
+    } catch {
+      this.entityEmbeddingsAvailable = false;
+      return false;
     }
   }
 }

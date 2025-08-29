@@ -66,10 +66,12 @@ export class MigrationManager {
       `);
       
       const versions: number[] = [];
-      for (let i = 0; i < result.numRows; i++) {
-        const row = result.getChild('version')?.get(i) as number;
-        if (row !== null) {
-          versions.push(row);
+      const rows = result.getRows();
+      
+      for (const row of rows) {
+        const version = row[0] as number;
+        if (version !== null) {
+          versions.push(version);
         }
       }
       

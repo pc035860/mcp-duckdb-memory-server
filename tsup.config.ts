@@ -7,6 +7,7 @@ export default defineConfig({
     "tools/merge-duckdb": "src/tools/merge-duckdb.ts",
     "tools/repair-database": "src/tools/repair-database.ts",
     "tools/migrate-database": "src/tools/migrate-database.ts",
+    "tools/backfill-embeddings": "src/tools/backfill-embeddings.ts",
   },
   format: "esm",
   outExtension: () => ({

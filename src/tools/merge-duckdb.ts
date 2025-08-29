@@ -335,7 +335,15 @@ class DuckDBMergeTool {
         this.logger.debug("Failed to detach databases", { error: detachError });
       }
       
-      outputConn?.close();
+      try {
+        // @ts-ignore
+        if (outputConn && typeof (outputConn as any).disconnect === 'function') {
+          // @ts-ignore
+          await (outputConn as any).disconnect();
+        } else {
+          (outputConn as any)?.close?.();
+        }
+      } catch {}
     }
   }
 

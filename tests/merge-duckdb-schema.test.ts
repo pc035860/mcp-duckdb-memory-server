@@ -55,7 +55,7 @@ describe("DuckDBMergeTool - Schema Validation and Migration", () => {
     `);
     // Missing: observations and relations tables
     
-    conn.close();
+    try { (conn as any).disconnect?.(); } catch {}
     // DuckDBInstance doesn't have close() method, connection close is sufficient
 
     // Try to merge - should fail due to invalid schema
@@ -96,7 +96,7 @@ describe("DuckDBMergeTool - Schema Validation and Migration", () => {
       // Update existing record with extra data
       await conn.run(`UPDATE entities SET extra_data = 'additional info' WHERE name = 'testentity2'`);
     } finally {
-      conn.close();
+      try { (conn as any).disconnect?.(); } catch {}
       await ensureDbFullyClosed(db2Path);
     }
 
@@ -309,7 +309,7 @@ describe("DuckDBMergeTool - Schema Validation and Migration", () => {
       // Ignore errors
     }
     
-    conn.close();
+    try { (conn as any).disconnect?.(); } catch {}
     // DuckDBInstance doesn't have close() method, connection close is sufficient
 
     // Attempt merge - should fail and rollback

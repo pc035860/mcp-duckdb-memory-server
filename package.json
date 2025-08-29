@@ -12,7 +12,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "pnpm build && npx @modelcontextprotocol/inspector pnpm start",
-    "build": "tsup && shx chmod +x dist/index.mjs && shx chmod +x dist/tools/merge-duckdb.mjs && shx chmod +x dist/tools/repair-database.mjs && shx chmod +x dist/tools/migrate-database.mjs",
+    "build": "tsup && shx chmod +x dist/index.mjs && shx chmod +x dist/tools/merge-duckdb.mjs && shx chmod +x dist/tools/repair-database.mjs && shx chmod +x dist/tools/migrate-database.mjs && shx chmod +x dist/tools/backfill-embeddings.mjs",
     "start": "node dist/index.mjs",
     "prepare": "npm run build",
     "test": "vitest run",
@@ -44,7 +44,7 @@
   "author": "IzumiSy",
   "license": "MIT",
   "dependencies": {
-    "@duckdb/node-api": "1.2.0-alpha.15",
+    "@duckdb/node-api": "1.3.2-alpha.26",
     "@modelcontextprotocol/sdk": "^1.6.0",
     "openai": "^5.16.0",
     "zod": "^3.24.2"

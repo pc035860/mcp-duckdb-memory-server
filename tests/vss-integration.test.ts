@@ -51,7 +51,7 @@ describe('VSS Integration Tests', () => {
   });
 
   afterEach(async () => {
-    if (manager && !manager.isClosed()) {
+    if (manager && !manager.isClosedCompat()) {
       await manager.close();
     }
     // Clean up env

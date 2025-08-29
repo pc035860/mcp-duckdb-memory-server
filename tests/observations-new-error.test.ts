@@ -189,7 +189,7 @@ describe('Direct observations_new Error Test', () => {
       
       expect(tableExists).toBe(false);
     } finally {
-      await conn.close();
+      try { (conn as any).disconnect?.(); } catch {}
     }
   });
 

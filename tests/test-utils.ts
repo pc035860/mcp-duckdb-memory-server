@@ -231,7 +231,7 @@ export async function ensureDbFullyClosed(dbPath: string): Promise<void> {
       // Ignore checkpoint errors
     }
     
-    conn.close();
+    try { (conn as any).disconnect?.(); } catch {}
     
     // Wait for final cleanup
     await new Promise(resolve => setTimeout(resolve, 100));

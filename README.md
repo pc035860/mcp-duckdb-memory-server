@@ -527,3 +527,51 @@ ENTITY_COUNT_THRESHOLD=999999 SERVER_MODE=main pnpm start
 ## License
 
 MIT License - see LICENSE file for details.
+ 
+## Vector Search (VSS) and Embeddings
+
+### Strategy C: entity_embeddings (Aux Table)
+- Single source of truth (SoT) for entity embeddings moves to `entity_embeddings`.
+- The server auto-detects this table and prefers it for:
+  - Semantic search (JOIN `entity_embeddings` → `entities`)
+  - HNSW index (`entity_embeddings_embedding_idx`)
+  - Health/coverage stats
+  - Write/cleanup paths
+
+No schema change is required for existing `entities` rows; the aux table is created on-demand during backfill or insert.
+
+### Backfill Embeddings Tool
+The backfill tool supports non-interactive runs and per-target control.
+
+Environment flags:
+
+```bash
+# Target: entities | observations | both (default: both)
+BACKFILL_TARGET=entities \
+# Entities workaround: strategyC (aux table) is recommended
+BACKFILL_ENTITIES_WORKAROUND=strategyC \
+# Batch size override (default: 50)
+BACKFILL_BATCH_SIZE=5 \
+OPENAI_API_KEY=$OPENAI_API_KEY \
+node dist/tools/backfill-embeddings.mjs
+```
+
+Notes:
+- The tool now runs without interactive confirmations.
+- Progress is saved to `backfill-progress.json` and resumes on re-run.
+- For observations, embeddings are written to `observations.embedding` as before.
+- For entities with Strategy C, embeddings are upserted into `entity_embeddings`.
+
+### Verification
+
+```sql
+-- Aux table populated
+SELECT COUNT(*) FROM entity_embeddings;
+
+-- Join integrity
+SELECT e.name FROM entities e JOIN entity_embeddings ee ON ee.name = e.name LIMIT 5;
+```
+
+### Node API Upgrade Notes
+- `@duckdb/node-api` upgrade changed connection close APIs.
+- The codebase now prefers `disconnect()` when available and falls back to `close()` if present.

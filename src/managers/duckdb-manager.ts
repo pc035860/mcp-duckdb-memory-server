@@ -108,8 +108,8 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     try {
       // Create DuckDB instance with VSS configuration
       // Enable HNSW persistence for vector similarity search (experimental)
-      const duckdbConfig = {
-        hnsw_enable_experimental_persistence: true,
+      const duckdbConfig: Record<string, string> = {
+        hnsw_enable_experimental_persistence: 'true',
       };
       this.instance = await DuckDBInstance.create(this.dbPath, duckdbConfig);
       this.connection = await this.instance.connect();
@@ -742,9 +742,16 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
   }
 
   /**
-   * Check if the manager is closed
+   * Check if the manager is closed (getter for existing callers)
    */
   get isClosed(): boolean {
+    return this.closed;
+  }
+
+  /**
+   * Backward-compatible method form for older tests expecting isClosed()
+   */
+  public isClosedCompat(): boolean {
     return this.closed;
   }
 
@@ -772,7 +779,16 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           this.logger.debug("Checkpoint failed during close (non-fatal)", extractError(checkpointError));
         }
         
-        this.connection.close();
+        // node-api v1.3 之後關閉連線使用 .disconnect()
+        try {
+          // @ts-ignore
+          if (typeof (this.connection as any).disconnect === 'function') {
+            // @ts-ignore
+            await (this.connection as any).disconnect();
+          } else {
+            (this.connection as any).close?.();
+          }
+        } catch {}
         this.connection = null;
       }
 
@@ -863,6 +879,21 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
             entity.entityType,
           ]);
         }
+
+        // Upsert into entity_embeddings if table exists (strategyC compatibility)
+        try {
+          const hasAux = await conn.runAndReadAll(
+            "SELECT 1 FROM duckdb_tables() WHERE table_name = 'entity_embeddings' LIMIT 1"
+          );
+          const exists = hasAux && (Array.isArray(hasAux) ? hasAux.length > 0 : (hasAux.getRows?.().length > 0));
+          if (exists) {
+            await conn.run(
+              `INSERT OR IGNORE INTO entity_embeddings(name, embedding, embedding_model, embedding_updated_at)
+               VALUES (?, NULL, NULL, NULL)`,
+              [entity.name]
+            );
+          }
+        } catch {}
 
         for (const observation of entity.observations) {
           if (entity.createdAt && this.allowExternalTimestamps) {
@@ -3313,7 +3344,8 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         },
         fallback: {
           enabled: true,
-          strategy: 'keyword' as const,
+          fallbackToKeyword: true,
+          healthCheckInterval: 60000,
         },
       };
       
