@@ -13,6 +13,7 @@ import type { EmbeddingVector, IEmbeddingService } from '../../types/embedding.j
 import type { Entity } from '../../types.js';
 import { getModelDimensions } from '../embedding/index.js';
 import { logger } from '../../logger.js';
+import { convertTimestampToISOWithFallback } from '../../utils.js';
 
 export class DuckDBVSSManager implements IVSSManager {
   private connection: DuckDBConnection;
@@ -205,11 +206,15 @@ export class DuckDBVSSManager implements IVSSManager {
           message.includes('No function matches the given name') &&
           message.includes('array_cosine_similarity') &&
           message.includes('FLOAT[]');
+        const isAnyTypeBindingIssue =
+          typeof message === 'string' &&
+          (message.includes('Cannot create values of type ANY') ||
+           message.includes('createValue.js'));
 
-        if (!this.fallbackToStringParam && isBinderArrayMismatch) {
+        if (!this.fallbackToStringParam && (isBinderArrayMismatch || isAnyTypeBindingIssue)) {
           this.fallbackToStringParam = true;
           logger.warn('VSS query param fallback to string casting', {
-            reason: 'Binder mismatch with FLOAT[]',
+            reason: isAnyTypeBindingIssue ? 'Node-API ANY type binding' : 'Binder mismatch with FLOAT[]',
             model: this.embeddingService.getConfig().model,
             expectedDim,
           });
@@ -564,11 +569,11 @@ export class DuckDBVSSManager implements IVSSManager {
     queryEmbedding: EmbeddingVector,
     options: VSSSearchOptions
   ): Promise<VSSSearchResult[]> {
-    const useAux = await this.isEntityEmbeddingsAvailable();
+    const useAux = await this.isAuxSearchable();
     let sql = '';
     if (useAux) {
       sql = `
-        SELECT e.name, e.entityType, e.observations, e.createdAt, ee.embedding,
+        SELECT e.name, e.entityType, e.created_at AS createdAt, ee.embedding,
                array_cosine_similarity(ee.embedding, $1::FLOAT[1536]) as similarity
         FROM entity_embeddings ee
         JOIN entities e ON ee.name = e.name
@@ -578,7 +583,7 @@ export class DuckDBVSSManager implements IVSSManager {
       `;
     } else {
       sql = `
-        SELECT e.name, e.entityType, e.observations, e.createdAt, e.embedding,
+        SELECT e.name, e.entityType, e.created_at AS createdAt, e.embedding,
                array_cosine_similarity(e.embedding, $1::FLOAT[1536]) as similarity
         FROM entities e
         WHERE e.embedding IS NOT NULL
@@ -610,19 +615,30 @@ export class DuckDBVSSManager implements IVSSManager {
     params.push(options.limit || 20);
 
     try {
-      const rows = await this.executeQuery(sql, params);
-      
-      return rows.map((row: any) => ({
-        entity: {
-          name: row.name,
-          entityType: row.entityType,
-          observations: JSON.parse(row.observations || '[]'),
-          createdAt: row.createdAt,
-        },
-        similarity: row.similarity,
-        matchSource: 'entity' as const,
-        embedding: options.includeEmbeddings ? row.embedding : undefined,
-      }));
+      const result = await this.executeQuery(sql, params);
+      const rowsArray: any[] = Array.isArray(result)
+        ? result
+        : (typeof result?.getRows === 'function' ? result.getRows() : []);
+
+      return rowsArray.map((row: any) => {
+        // Support both object rows and array rows
+        const name = Array.isArray(row) ? row[0] : row.name;
+        const entityType = Array.isArray(row) ? row[1] : row.entityType;
+        const createdAtRaw = Array.isArray(row) ? row[2] : row.createdAt;
+        const embedding = Array.isArray(row) ? row[3] : row.embedding;
+        const similarity = Array.isArray(row) ? row[4] : row.similarity;
+        return {
+          entity: {
+            name,
+            entityType,
+            observations: [],
+            createdAt: convertTimestampToISOWithFallback(createdAtRaw),
+          },
+          similarity,
+          matchSource: 'entity' as const,
+          embedding: options.includeEmbeddings ? embedding : undefined,
+        };
+      });
     } catch (error) {
       logger.error('Entity VSS search failed', { error });
       throw error;
@@ -634,8 +650,8 @@ export class DuckDBVSSManager implements IVSSManager {
     options: VSSSearchOptions
   ): Promise<VSSSearchResult[]> {
     let sql = `
-      SELECT o.entityName, o.content, o.createdAt, o.embedding,
-             e.entityType, e.observations,
+      SELECT o.entityName, o.content, e.created_at AS createdAt, o.embedding,
+             e.entityType,
              array_cosine_similarity(o.embedding, $1::FLOAT[1536]) as similarity
       FROM observations o
       JOIN entities e ON o.entityName = e.name
@@ -658,20 +674,31 @@ export class DuckDBVSSManager implements IVSSManager {
     params.push(options.limit || 20);
 
     try {
-      const rows = await this.executeQuery(sql, params);
-      
-      return rows.map((row: any) => ({
-        entity: {
-          name: row.entityName,
-          entityType: row.entityType,
-          observations: JSON.parse(row.observations || '[]'),
-          createdAt: row.createdAt,
-        },
-        similarity: row.similarity,
-        matchSource: 'observation' as const,
-        matchedContent: row.content,
-        embedding: options.includeEmbeddings ? row.embedding : undefined,
-      }));
+      const result = await this.executeQuery(sql, params);
+      const rowsArray: any[] = Array.isArray(result)
+        ? result
+        : (typeof result?.getRows === 'function' ? result.getRows() : []);
+
+      return rowsArray.map((row: any) => {
+        const entityName = Array.isArray(row) ? row[0] : row.entityName;
+        const content = Array.isArray(row) ? row[1] : row.content;
+        const createdAtRaw = Array.isArray(row) ? row[2] : row.createdAt;
+        const embedding = Array.isArray(row) ? row[3] : row.embedding;
+        const entityType = Array.isArray(row) ? row[4] : row.entityType;
+        const similarity = Array.isArray(row) ? row[5] : row.similarity;
+        return {
+          entity: {
+            name: entityName,
+            entityType,
+            observations: [],
+            createdAt: convertTimestampToISOWithFallback(createdAtRaw),
+          },
+          similarity,
+          matchSource: 'observation' as const,
+          matchedContent: content,
+          embedding: options.includeEmbeddings ? embedding : undefined,
+        };
+      });
     } catch (error) {
       logger.error('Observation VSS search failed', { error });
       throw error;
@@ -693,6 +720,28 @@ export class DuckDBVSSManager implements IVSSManager {
     }
     const embeddingArray = Array.isArray(embedding) ? embedding : Array.from(embedding);
     return '[' + embeddingArray.join(',') + ']';
+  }
+
+  // Aux 是否可搜尋：表存在且至少有一筆有效向量（長度符合期望）
+  private async isAuxSearchable(): Promise<boolean> {
+    // 先確認表存在
+    const exists = await this.isEntityEmbeddingsAvailable();
+    if (!exists) return false;
+    // 檢查是否有至少一筆有效向量
+    const expected = this.getExpectedEmbeddingDimension();
+    try {
+      const rows = await this.executeQuery(
+        `SELECT 1 FROM entity_embeddings WHERE embedding IS NOT NULL AND array_length(embedding, 1) = $1 LIMIT 1`,
+        [expected]
+      );
+      const hasRow = Array.isArray(rows)
+        ? rows.length > 0
+        : (typeof rows?.getRows === 'function' ? rows.getRows().length > 0 : false);
+      return hasRow;
+    } catch (err) {
+      // 如果查詢失敗，保守回退為不可搜尋
+      return false;
+    }
   }
 
   private async processBatchEntityEmbeddings(entityNames: string[]): Promise<void> {

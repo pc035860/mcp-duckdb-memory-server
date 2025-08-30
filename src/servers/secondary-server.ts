@@ -178,16 +178,16 @@ export class SecondaryServer {
     // Search nodes tool
     this.mcpServer.tool(
       "search_nodes",
-      "Search for nodes in the knowledge graph using advanced search strategies including semantic search, keyword search, and hybrid search. Supports both traditional keyword matching and AI-powered semantic similarity search using OpenAI embeddings.",
+      "Search for nodes using advanced strategies: semantic, keyword, and hybrid. Semantic/hybrid uses AI embeddings (VSS) and is recommended for natural language queries, including Chinese. Keyword mode does exact/LIKE matching.",
       {
         query: z
           .string()
           .describe(
-            "The search query to match against entity names, types, and observation content. For semantic search, use natural language descriptions (e.g., 'machine learning concepts', 'user authentication systems'). For keyword search, use specific terms."
+            "Query text matched against names, types, and observations. Prefer semantic/hybrid for natural language (multi-lingual, incl. Chinese). Use keyword for exact terms or operators."
           ),
         options: SearchNodesOptionsSchema
           .optional()
-          .describe("Search options including scope, time range filtering, and search strategy. Use searchMode to control search behavior: 'keyword' for traditional text matching, 'semantic' for AI-powered similarity search, 'hybrid' for best of both approaches (recommended), or omit for automatic selection."),
+          .describe("Options: scope, time range, and strategy. Use searchMode: 'keyword' (text match), 'semantic' (VSS), 'hybrid' (recommended, multi-lingual incl. Chinese), or omit for auto."),
       },
       async ({ query, options }) => {
         const mergedOptions = {
@@ -198,7 +198,7 @@ export class SecondaryServer {
           },
         } as any;
         const payload = await this.manager.searchNodes(query, mergedOptions);
-        const text = JSON.stringify(payload);
+        const text = JSON.stringify(payload, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
         this.logger.debug("MCP response size (search_nodes)", { chars: text.length });
         return {
           content: [

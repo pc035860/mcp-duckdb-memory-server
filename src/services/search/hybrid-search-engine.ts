@@ -45,7 +45,7 @@ export const DEFAULT_HYBRID_CONFIG: HybridSearchConfig = {
   rrfK: 60,
   keywordWeight: 0.4,
   semanticWeight: 0.6,
-  semanticThreshold: 0.7,
+  semanticThreshold: 0.4,
   keywordMinScore: 0.1,
   maxResultsPerStrategy: 50,
 };
@@ -147,7 +147,7 @@ export class HybridSearchEngine {
       };
 
       const semanticResults = await this.vssManager.searchWithVSS(
-        embeddingResult.embedding, 
+        embeddingResult.vector,
         vssOptions
       );
 

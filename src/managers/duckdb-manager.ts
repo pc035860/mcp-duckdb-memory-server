@@ -1379,7 +1379,8 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       this.logger.debug(`Search request: "${query}", mode: ${searchMode || 'auto'}, scope: ${scope || 'none'}, VSS available: ${this.isVSSAvailable()}`);
       
       // Use hybrid search engine if available and searchMode allows it
-      if (this.isVSSAvailable() && this.hybridSearchEngine && (searchMode === 'semantic' || searchMode === 'hybrid' || (!searchMode && !containsChinese(query)))) {
+      // Allow Chinese queries to use VSS/hybrid as well (removed containsChinese guard)
+      if (this.isVSSAvailable() && this.hybridSearchEngine && (searchMode === 'semantic' || searchMode === 'hybrid' || !searchMode)) {
         try {
           this.logger.debug(`Using hybrid search engine with mode: ${searchMode || 'auto'}`);
           const hybridResults = await this.hybridSearchEngine.searchHybrid(query, options);
@@ -1395,6 +1396,15 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       }
       
 
+      // Deduplicate entities by name (semantic-only path may yield duplicates)
+      if (entities.length > 1) {
+        const byName = new Map<string, Entity>();
+        for (const e of entities) {
+          if (!byName.has(e.name)) byName.set(e.name, e);
+        }
+        entities = Array.from(byName.values());
+      }
+
       const entityNames = entities.map((entity) => entity.name);
 
       if (entityNames.length === 0) {
@@ -1403,6 +1413,30 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Get related relations
       const conn = await this.getConnection();
+
+      // Hydrate observations if requested (before trimming)
+      const output = options?.output;
+      const includeObservations = output?.includeObservations ?? !output?.compact;
+      if (includeObservations && entityNames.length > 0) {
+        const obsPlaceholders = entityNames.map(() => "?").join(",");
+        const obsReader = await conn.runAndReadAll(
+          `SELECT entityName, content FROM observations WHERE entityName IN (${obsPlaceholders}) ORDER BY created_at`,
+          entityNames
+        );
+        const rows = obsReader.getRows();
+        const nameToObs = new Map<string, string[]>();
+        for (const row of rows) {
+          const name = row[0] as string;
+          const content = row[1] as string;
+          const list = nameToObs.get(name) || [];
+          list.push(content);
+          nameToObs.set(name, list);
+        }
+        entities = entities.map((e) => ({
+          ...e,
+          observations: e.observations && e.observations.length > 0 ? e.observations : (nameToObs.get(e.name) || []),
+        }));
+      }
       const placeholders = entityNames.map(() => "?").join(",");
       const relationsReader = await conn.runAndReadAll(
         `
@@ -1426,19 +1460,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       });
 
       // Apply output limiting if provided
-      const output = options?.output;
+      // (note: output already read above for hydration; reusing is fine)
 
       // Entity limiting
       const maxEntities = output?.maxEntities && output.maxEntities > 0 ? output.maxEntities : undefined;
       const limitedEntities = maxEntities ? entities.slice(0, maxEntities) : entities;
 
       // Observations trimming (compact or explicitly exclude observations)
-      const includeObservations = output?.includeObservations ?? !output?.compact;
+      const includeObservations2 = output?.includeObservations ?? !output?.compact;
       const maxObs = output?.maxObservationsPerEntity ?? undefined;
       const snippetChars = output?.snippetChars ?? undefined;
       const trimmedEntities = limitedEntities.map((e) => {
         const total = e.observations?.length || 0;
-        if (!includeObservations) {
+        if (!includeObservations2) {
           return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
         }
         if (!maxObs && !snippetChars) {
