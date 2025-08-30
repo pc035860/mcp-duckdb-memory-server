@@ -6,7 +6,8 @@ import { ServerConfig } from "../config/server-config";
 import { Logger, ConsoleLogger } from "../logger";
 import { extractError } from "../utils";
 import { EntityObject, ObservationObject, RelationObject } from "../types";
-import { SearchNodesOptionsSchema, MultiKeywordSearchOptionsSchema } from "../utils/time-validation-schemas";
+import { SearchNodesOptionsSchema, MultiKeywordSearchOptionsSchema, buildSearchNodesOptionsSchema, buildMultiKeywordSearchOptionsSchema } from "../utils/time-validation-schemas";
+import { SearchNodesOptions, MultiKeywordSearchOptions } from "../types";
 
 /**
  * Secondary server that provides MCP interface and forwards requests to main server
@@ -38,9 +39,34 @@ export class SecondaryServer {
   }
 
   /**
+   * Merge output options with config defaults
+   */
+  private mergeOutputOptions(options?: any): any {
+    return {
+      ...options,
+      output: {
+        ...(this.config.output || {}),
+        ...(options?.output || {}),
+      },
+    };
+  }
+
+  /**
    * Setup MCP tools
    */
   private setupMCPTools(): void {
+    const defaults = {
+      compact: this.config.output?.compact ?? true,
+      includeObservations: this.config.output?.includeObservations ?? false,
+      maxEntities: this.config.output?.maxEntities ?? 20,
+      maxObservationsPerEntity: this.config.output?.maxObservationsPerEntity ?? 3,
+      snippetChars: this.config.output?.snippetChars ?? 280,
+      includeRelations: (this.config.output?.includeRelations ?? 'subset') as 'none' | 'subset' | 'all',
+      maxRelations: this.config.output?.maxRelations ?? 200,
+      maxResponseChars: this.config.output?.maxResponseChars ?? 50000,
+    } as const;
+    const DynamicSearchNodesOptionsSchema = buildSearchNodesOptionsSchema(defaults);
+    const DynamicMultiKeywordSearchOptionsSchema = buildMultiKeywordSearchOptionsSchema(defaults);
     // Create entities tool
     this.mcpServer.tool(
       "create_entities",
@@ -185,18 +211,12 @@ export class SecondaryServer {
           .describe(
             "Query text matched against names, types, and observations. Prefer semantic/hybrid for natural language (multi-lingual, incl. Chinese). Use keyword for exact terms or operators."
           ),
-        options: SearchNodesOptionsSchema
+        options: DynamicSearchNodesOptionsSchema
           .optional()
           .describe("Options: scope, time range, and strategy. Use searchMode: 'keyword' (text match), 'semantic' (VSS), 'hybrid' (recommended, multi-lingual incl. Chinese), or omit for auto."),
       },
       async ({ query, options }) => {
-        const mergedOptions = {
-          ...options,
-          output: {
-            ...(this.config.output || {}),
-            ...(options?.output || {}),
-          },
-        } as any;
+        const mergedOptions = this.mergeOutputOptions(options) as SearchNodesOptions;
         const payload = await this.manager.searchNodes(query, mergedOptions);
         const text = JSON.stringify(payload, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
         this.logger.debug("MCP response size (search_nodes)", { chars: text.length });
@@ -219,18 +239,12 @@ export class SecondaryServer {
         keywords: z
           .array(z.string())
           .describe("An array of keywords to search for. For semantic search, include conceptually related terms (e.g., ['authentication', 'login', 'security', 'user access']). For keyword search, use specific exact terms."),
-        options: MultiKeywordSearchOptionsSchema
+        options: DynamicMultiKeywordSearchOptionsSchema
           .optional()
           .describe("Search options including combination mode (AND/OR), scope, time range filtering, and output formatting. The search uses the same advanced strategies as search_nodes, automatically selecting the best approach based on available services."),
       },
       async ({ keywords, options }) => {
-        const mergedOptions = {
-          ...options,
-          output: {
-            ...(this.config.output || {}),
-            ...(options?.output || {}),
-          },
-        } as any;
+        const mergedOptions = this.mergeOutputOptions(options) as MultiKeywordSearchOptions;
         const payload = await this.manager.searchMultiKeywords(keywords, mergedOptions);
         const text = JSON.stringify(payload);
         this.logger.debug("MCP response size (search_multi_keywords)", { chars: text.length });

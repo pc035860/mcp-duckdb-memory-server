@@ -1412,11 +1412,50 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Get related relations
       const conn = await this.getConnection();
+      // If we are not including observations, fetch count per entity to keep observationsCount accurate
+      const out2 = options?.output;
+      const incObs2 = out2?.includeObservations ?? !out2?.compact;
+      if (!incObs2) {
+        const countPlaceholders = entityNames.map(() => "?").join(",");
+        const countReader = await conn.runAndReadAll(
+          `SELECT entityName, COUNT(*) AS cnt FROM observations WHERE entityName IN (${countPlaceholders}) GROUP BY entityName`,
+          entityNames
+        );
+        const countRows = countReader.getRows();
+        const nameToCount = new Map<string, number>();
+        for (const row of countRows) {
+          nameToCount.set(row[0] as string, Number(row[1]));
+        }
+        entities = entities.map((e) => ({
+          ...e,
+          observationsCount: (e as any).observationsCount ?? (nameToCount.get(e.name) || 0),
+          observations: e.observations || [],
+        }));
+      }
 
       // Hydrate observations if requested (before trimming)
       const output = options?.output;
-      const includeObservations = output?.includeObservations ?? !output?.compact;
-      if (includeObservations && entityNames.length > 0) {
+      // If observations are not included, fetch counts only to keep observationsCount accurate
+      const includeObservationsFlag = output?.includeObservations ?? !output?.compact;
+      if (!includeObservationsFlag && entityNames.length > 0) {
+        const countPlaceholders = entityNames.map(() => "?").join(",");
+        const countReader = await conn.runAndReadAll(
+          `SELECT entityName, COUNT(*) AS cnt FROM observations WHERE entityName IN (${countPlaceholders}) GROUP BY entityName`,
+          entityNames
+        );
+        const countRows = countReader.getRows();
+        const nameToCount = new Map<string, number>();
+        for (const row of countRows) {
+          nameToCount.set(row[0] as string, Number(row[1]));
+        }
+        entities = entities.map((e) => ({
+          ...e,
+          observationsCount: (e as any).observationsCount ?? (nameToCount.get(e.name) || 0),
+          observations: e.observations || [],
+        }));
+      }
+      const includeObservations = includeObservationsFlag;
+      if (includeObservationsFlag && entityNames.length > 0) {
         const obsPlaceholders = entityNames.map(() => "?").join(",");
         const obsReader = await conn.runAndReadAll(
           `SELECT entityName, content FROM observations WHERE entityName IN (${obsPlaceholders}) ORDER BY created_at`,
@@ -1434,6 +1473,23 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         entities = entities.map((e) => ({
           ...e,
           observations: e.observations && e.observations.length > 0 ? e.observations : (nameToObs.get(e.name) || []),
+        }));
+      } else if (!includeObservationsFlag && entityNames.length > 0) {
+        // Not hydrating observations: fetch counts only for accurate observationsCount in previews
+        const countPlaceholders = entityNames.map(() => "?").join(",");
+        const countReader = await conn.runAndReadAll(
+          `SELECT entityName, COUNT(*) AS cnt FROM observations WHERE entityName IN (${countPlaceholders}) GROUP BY entityName`,
+          entityNames
+        );
+        const countRows = countReader.getRows();
+        const nameToCount = new Map<string, number>();
+        for (const row of countRows) {
+          nameToCount.set(row[0] as string, Number(row[1]));
+        }
+        entities = entities.map((e) => ({
+          ...e,
+          observationsCount: (e as any).observationsCount ?? (nameToCount.get(e.name) || 0),
+          observations: e.observations || [],
         }));
       }
       const placeholders = entityNames.map(() => "?").join(",");
@@ -1470,7 +1526,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const maxObs = output?.maxObservationsPerEntity ?? undefined;
       const snippetChars = output?.snippetChars ?? undefined;
       const trimmedEntities = limitedEntities.map((e) => {
-        const total = e.observations?.length || 0;
+        const total = (typeof (e as any).observationsCount === 'number')
+          ? (e as any).observationsCount as number
+          : (e.observations?.length || 0);
         if (!includeObservations2) {
           return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
         }
@@ -1606,7 +1664,9 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const maxObs = output?.maxObservationsPerEntity ?? undefined;
       const snippetChars = output?.snippetChars ?? undefined;
       const trimmedEntities = limitedEntities.map((e) => {
-        const total = e.observations?.length || 0;
+        const total = (typeof (e as any).observationsCount === 'number')
+          ? (e as any).observationsCount as number
+          : (e.observations?.length || 0);
         if (!includeObservations) {
           return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
         }
