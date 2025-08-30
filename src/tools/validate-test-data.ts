@@ -4,7 +4,10 @@
  * 快速驗證生成的測試資料庫是否符合預期
  */
 
-import Database from 'better-sqlite3';
+// better-sqlite3 型別在執行工具時才需要，建置期無需提供型別檔
+// 以 any 接受以避免在未安裝對應型別時的編譯錯誤
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const BetterSqlite3: any = require('better-sqlite3');
 import path from 'path';
 import fs from 'fs';
 
@@ -104,7 +107,7 @@ export class TestDataValidator {
       const expectedConfig = JSON.parse(fs.readFileSync(validationPath, 'utf-8'));
 
       // 連接資料庫並驗證
-      const db = new Database(dbPath, { readonly: true });
+      const db = new BetterSqlite3(dbPath, { readonly: true });
 
       try {
         // 1. 驗證基本表結構
@@ -251,9 +254,10 @@ export class TestDataValidator {
       }
 
     } catch (error) {
-      report.issues.push(`驗證過程發生錯誤: ${error.message}`);
+      const message = (error instanceof Error) ? error.message : String(error);
+      report.issues.push(`驗證過程發生錯誤: ${message}`);
       report.status = 'fail';
-      console.log(`   💥 驗證失敗: ${error.message}`);
+      console.log(`   💥 驗證失敗: ${message}`);
     }
 
     return report;

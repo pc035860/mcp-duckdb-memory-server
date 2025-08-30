@@ -1527,8 +1527,10 @@ class DatabaseMigrationTool {
       const relations = await this.readRelations(sourceConn, options.filterPrefix);
       
       // Close source connection
-      sourceConn.close();
-      sourceConn = null;
+      if (sourceConn) {
+        // DuckDBConnection in node-api does not expose async close; use instance.close() instead in finally
+        sourceConn = null;
+      }
       
       // Create and initialize target database (skip in dry-run)
       if (!this.dryRunMode) {
@@ -1555,9 +1557,11 @@ class DatabaseMigrationTool {
         retryDelayMs: options.retryDelayMs,
         preserveTimestamps: options.preserveTimestamps
       };
-      await this.writeEntities(targetConn, entities, options.batchSize, writeOptions);
-      await this.writeObservations(targetConn, observations, options.batchSize, writeOptions);
-      await this.writeRelations(targetConn, relations, options.batchSize, writeOptions);
+      if (targetConn) {
+        await this.writeEntities(targetConn, entities, options.batchSize, writeOptions);
+        await this.writeObservations(targetConn, observations, options.batchSize, writeOptions);
+        await this.writeRelations(targetConn, relations, options.batchSize, writeOptions);
+      }
       
       // Verify migration if not skipped (skip in dry-run)
       let verificationResult;
@@ -1640,8 +1644,13 @@ class DatabaseMigrationTool {
       throw error;
     } finally {
       // Clean up connections
-      sourceConn?.close();
-      targetConn?.close();
+      // Close instances rather than connections (node-api)
+      if (sourceInstance) {
+        sourceInstance.closeSync();
+      }
+      if (targetInstance) {
+        targetInstance.closeSync();
+      }
     }
   }
 

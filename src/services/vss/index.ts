@@ -1,4 +1,6 @@
 // VSS (Vector Similarity Search) 服務入口檔案
+import type { VSSConfigType, VSSSearchOptions } from '../../types/vss.js';
+import { VSSConfigSchema } from '../../types/vss.js';
 
 // 匯出所有 VSS 相關類型
 export type {

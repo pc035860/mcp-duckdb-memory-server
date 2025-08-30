@@ -16,7 +16,6 @@ import { dirname } from "path";
 import { existsSync, mkdirSync } from "fs";
 import { extractError, convertTimestampToISOWithFallback } from "../utils";
 import { ConcurrencyController, OperationType } from "../utils/concurrency-controller";
-import { containsChinese } from "../utils/text-utils";
 import { MigrationManager } from "../migrations/migration-manager.js";
 
 // VSS imports
@@ -1552,21 +1551,16 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
 
       // Use hybrid search strategy for better performance
       const entityCount = await this.getCachedEntityCount();
-      const hasChineseInKeywords = validKeywords.some(keyword => containsChinese(keyword));
       
       let entities: Entity[] = [];
       
-      if (hasChineseInKeywords || entityCount < this.entityCountThreshold) {
-        // Chinese text or small dataset: use SQL LIKE search with multiple keywords
-        if (hasChineseInKeywords) {
-          this.logger.debug(`Using LIKE search for multi-keyword search due to Chinese character detection${options?.scope ? ` with scope: ${options.scope}` : ''}`);
-        } else {
-          this.logger.debug(`Using LIKE search for multi-keyword search (small dataset)${options?.scope ? ` with scope: ${options.scope}` : ''}`);
-        }
+      if (entityCount < this.entityCountThreshold) {
+        // Small dataset: use SQL LIKE search with multiple keywords
+        this.logger.debug(`Using LIKE search for multi-keyword search (small dataset)${options?.scope ? ` with scope: ${options.scope}` : ''}`);
         entities = await this.searchWithMultiKeywordLike(validKeywords, options);
       } else {
-        // Large dataset without Chinese: use FTS search with multiple keywords
-        this.logger.debug(`Using FTS search for multi-keyword search${options?.scope ? ` with scope: ${options.scope}` : ''}`);
+        // Large dataset: use FTS search with multiple keywords
+        this.logger.debug(`Using FTS search for multi-keyword search (large dataset)${options?.scope ? ` with scope: ${options.scope}` : ''}`);
         entities = await this.searchWithMultiKeywordFTS(validKeywords, options);
       }
       
@@ -3609,19 +3603,14 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
     timeRange?: TimeRangeOptions
   ): Promise<Entity[]> {
     const entityCount = await this.getCachedEntityCount();
-    const hasChinese = containsChinese(query);
     
-    // Choose search strategy based on dataset size and Chinese character detection
-    if (hasChinese || entityCount < this.entityCountThreshold) {
-      // Chinese text or small dataset: use SQL LIKE search
-      if (hasChinese) {
-        this.logger.debug("Using LIKE search due to Chinese character detection");
-      } else {
-        this.logger.debug("Using LIKE search for small dataset");
-      }
+    // Choose search strategy based on dataset size
+    if (entityCount < this.entityCountThreshold) {
+      // Small dataset: use SQL LIKE search
+      this.logger.debug("Using LIKE search for small dataset");
       return await this.searchWithLike(query, scope, timeRange);
     } else {
-      // Large dataset without Chinese: use FTS search
+      // Large dataset: use FTS search
       this.logger.debug("Using FTS search for large dataset");
       return await this.searchWithFTS(query, scope, timeRange);
     }

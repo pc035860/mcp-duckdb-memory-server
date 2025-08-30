@@ -114,7 +114,12 @@ export class EmbeddingLRUCache implements IEmbeddingCache {
       hitRate: this.getHitRate(),
     };
 
-    logger.debug('Cache stats requested', stats);
+    logger.debug('Cache stats requested', {
+      hits: stats.hits,
+      misses: stats.misses,
+      size: stats.size,
+      hitRate: stats.hitRate,
+    });
     return stats;
   }
 

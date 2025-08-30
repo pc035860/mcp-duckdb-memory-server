@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import type { Connection } from '@duckdb/duckdb-wasm';
+import type { DuckDBConnection } from '@duckdb/node-api';
 import { logger } from '../logger.js';
 import { extractError } from '../utils.js';
 
@@ -17,10 +17,10 @@ export interface Migration {
 }
 
 export class MigrationManager {
-  private connection: Connection;
+  private connection: DuckDBConnection;
   private migrationsPath: string;
 
-  constructor(connection: Connection) {
+  constructor(connection: DuckDBConnection) {
     this.connection = connection;
     
     // Try to find the correct migrations path
@@ -199,7 +199,7 @@ export class MigrationManager {
         AND column_name = 'embedding'
       `);
       
-      return result.numRows > 0;
+      return result.getRows().length > 0;
     } catch (error) {
       logger.debug('VSS support check failed', extractError(error));
       return false;

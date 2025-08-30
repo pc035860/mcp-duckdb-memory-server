@@ -5,7 +5,9 @@
  * 支援空資料庫、小型、大型、特殊字元、邊界條件等不同情境
  */
 
-import Database from 'better-sqlite3';
+// better-sqlite3 僅於執行工具時需要，為避免編譯期型別缺失，使用 require any
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const BetterSqlite3: any = require('better-sqlite3');
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -139,7 +141,7 @@ export class TestScenarioGenerator {
       fs.unlinkSync(dbPath);
     }
     
-    const db = new Database(dbPath);
+    const db = new BetterSqlite3(dbPath);
     
     try {
       // 建立基本 schema（遷移前狀態）
@@ -167,7 +169,7 @@ export class TestScenarioGenerator {
   /**
    * 建立基本資料庫 schema（遷移前狀態）
    */
-  private createBaseSchema(db: Database): void {
+  private createBaseSchema(db: any): void {
     // 建立 schema_migrations 表（如果不存在）
     db.exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -221,7 +223,7 @@ export class TestScenarioGenerator {
   /**
    * 生成測試資料
    */
-  private async generateTestData(db: Database, scenario: TestScenario): Promise<void> {
+  private async generateTestData(db: any, scenario: TestScenario): Promise<void> {
     const isSpecialChars = scenario.specialFeatures.includes('unicode');
     const isEdgeCases = scenario.specialFeatures.includes('empty_strings');
     

@@ -61,7 +61,8 @@ class DatabaseRepairTool {
       this.printRepairReport();
       throw error;
     } finally {
-      conn.close();
+      // Close via instance since node-api connection does not have async close
+      instance.closeSync();
     }
   }
 

@@ -569,26 +569,27 @@ export class DuckDBVSSManager implements IVSSManager {
     queryEmbedding: EmbeddingVector,
     options: VSSSearchOptions
   ): Promise<VSSSearchResult[]> {
+    const expectedDim = this.getExpectedEmbeddingDimension();
     const useAux = await this.isAuxSearchable();
     let sql = '';
     if (useAux) {
       sql = `
         SELECT e.name, e.entityType, e.created_at AS createdAt, ee.embedding,
-               array_cosine_similarity(ee.embedding, $1::FLOAT[1536]) as similarity
+               array_cosine_similarity(ee.embedding, $1::FLOAT[${expectedDim}]) as similarity
         FROM entity_embeddings ee
         JOIN entities e ON ee.name = e.name
         WHERE ee.embedding IS NOT NULL
           AND len(ee.embedding) > 0
-          AND array_cosine_similarity(ee.embedding, $1::FLOAT[1536]) >= $2
+          AND array_cosine_similarity(ee.embedding, $1::FLOAT[${expectedDim}]) >= $2
       `;
     } else {
       sql = `
         SELECT e.name, e.entityType, e.created_at AS createdAt, e.embedding,
-               array_cosine_similarity(e.embedding, $1::FLOAT[1536]) as similarity
+               array_cosine_similarity(e.embedding, $1::FLOAT[${expectedDim}]) as similarity
         FROM entities e
         WHERE e.embedding IS NOT NULL
           AND len(e.embedding) > 0
-          AND array_cosine_similarity(e.embedding, $1::FLOAT[1536]) >= $2
+          AND array_cosine_similarity(e.embedding, $1::FLOAT[${expectedDim}]) >= $2
       `;
     }
 
@@ -649,15 +650,16 @@ export class DuckDBVSSManager implements IVSSManager {
     queryEmbedding: EmbeddingVector,
     options: VSSSearchOptions
   ): Promise<VSSSearchResult[]> {
+    const expectedDim = this.getExpectedEmbeddingDimension();
     let sql = `
       SELECT o.entityName, o.content, e.created_at AS createdAt, o.embedding,
              e.entityType,
-             array_cosine_similarity(o.embedding, $1::FLOAT[1536]) as similarity
+             array_cosine_similarity(o.embedding, $1::FLOAT[${expectedDim}]) as similarity
       FROM observations o
       JOIN entities e ON o.entityName = e.name
       WHERE o.embedding IS NOT NULL
         AND len(o.embedding) > 0
-        AND array_cosine_similarity(o.embedding, $1::FLOAT[1536]) >= $2
+        AND array_cosine_similarity(o.embedding, $1::FLOAT[${expectedDim}]) >= $2
     `;
 
     const params: any[] = [this.formatEmbeddingParam(queryEmbedding), options.threshold || 0.7];
@@ -771,16 +773,17 @@ export class DuckDBVSSManager implements IVSSManager {
   }
 
   private async updateEntityEmbeddingInDB(entityName: string, embedding: EmbeddingVector): Promise<void> {
+    const expectedDim = this.getExpectedEmbeddingDimension();
     const useAux = await this.isEntityEmbeddingsAvailable();
     // Runtime guard: ensure embedding dimension is correct before write
-    if (!embedding || (embedding as any).length !== 1536) {
-      logger.error('Invalid entity embedding dimension', { length: (embedding as any)?.length, entityName });
-      throw new Error(`Invalid entity embedding dimension: expected 1536, got ${(embedding as any)?.length}`);
+    if (!embedding || (embedding as any).length !== expectedDim) {
+      logger.error('Invalid entity embedding dimension', { expectedDim, length: (embedding as any)?.length, entityName });
+      throw new Error(`Invalid entity embedding dimension: expected ${expectedDim}, got ${(embedding as any)?.length}`);
     }
     if (useAux) {
       const sqlAux = `
         INSERT INTO entity_embeddings(name, embedding, embedding_model, embedding_updated_at)
-        VALUES ($2, $1::FLOAT[1536], $3, CURRENT_TIMESTAMP)
+        VALUES ($2, $1::FLOAT[${expectedDim}], $3, CURRENT_TIMESTAMP)
         ON CONFLICT (name) DO UPDATE SET
           embedding = EXCLUDED.embedding,
           embedding_model = EXCLUDED.embedding_model,
@@ -794,7 +797,7 @@ export class DuckDBVSSManager implements IVSSManager {
     } else {
       const sql = `
         UPDATE entities 
-        SET embedding = $1::FLOAT[1536], 
+        SET embedding = $1::FLOAT[${expectedDim}], 
             embedding_updated_at = CURRENT_TIMESTAMP,
             embedding_model = $3
         WHERE name = $2
@@ -912,6 +915,7 @@ export class DuckDBVSSManager implements IVSSManager {
   }
 
   private async getIndexStatuses(): Promise<VSSIndexStatus[]> {
+    const expectedDim = this.getExpectedEmbeddingDimension();
     const statuses: VSSIndexStatus[] = [];
     
     try {
@@ -931,7 +935,7 @@ export class DuckDBVSSManager implements IVSSManager {
             column: 'embedding',
             indexType: 'HNSW',
             metric: this.config.indexParams.metric,
-            dimensions: 1536,
+            dimensions: expectedDim,
             totalVectors: entityCount,
             parameters: {
               ...this.config.indexParams,
@@ -953,7 +957,7 @@ export class DuckDBVSSManager implements IVSSManager {
             column: 'embedding',
             indexType: 'HNSW',
             metric: this.config.indexParams.metric,
-            dimensions: 1536,
+            dimensions: expectedDim,
             totalVectors: entityCount,
             parameters: {
               ...this.config.indexParams,
@@ -978,7 +982,7 @@ export class DuckDBVSSManager implements IVSSManager {
           column: 'embedding',
           indexType: 'HNSW',
           metric: this.config.indexParams.metric,
-          dimensions: 1536,
+          dimensions: expectedDim,
           totalVectors: observationCount,
           parameters: {
             ...this.config.indexParams,
@@ -1004,7 +1008,7 @@ export class DuckDBVSSManager implements IVSSManager {
           column: 'embedding',
           indexType: 'HNSW',
           metric: this.config.indexParams.metric,
-          dimensions: 1536,
+          dimensions: expectedDim,
           totalVectors: await this.countEntitiesWithEmbeddings().catch(() => 0),
           parameters: { ...this.config.indexParams, error: 'Status check failed' },
           isHealthy: false,
