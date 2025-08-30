@@ -215,7 +215,7 @@ describe('Auto Mode Search Intelligence', () => {
       const edgeQueries = ['', ' ', '\\n', '\\t'];
       
       for (const query of edgeQueries) {
-        const results = await manager.searchNodes(query);
+        const results = await manager.searchNodes(query, { searchMode: 'keyword' as any });
         
         expect(results).toBeTruthy();
         expect(results.entities).toEqual([]);
@@ -233,7 +233,7 @@ describe('Auto Mode Search Intelligence', () => {
       ];
       
       for (const query of specialQueries) {
-        const results = await manager.searchNodes(query);
+        const results = await manager.searchNodes(query, { searchMode: 'keyword' as any });
         
         // Should not throw errors
         expect(results).toBeTruthy();
@@ -255,7 +255,7 @@ describe('Auto Mode Search Intelligence', () => {
       const startTime = Date.now();
       
       const results = await Promise.all(
-        testQueries.map(({ query }) => manager.searchNodes(query))
+        testQueries.map(({ query }) => manager.searchNodes(query, { searchMode: 'keyword' as any }))
       );
       
       const totalTime = Date.now() - startTime;

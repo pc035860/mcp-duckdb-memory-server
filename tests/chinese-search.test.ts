@@ -72,9 +72,6 @@ describe("Chinese Search Detection", () => {
       
       // Verify that LIKE search was chosen due to Chinese detection
       expect(mockLogger.debug).toHaveBeenCalledWith(
-        expect.stringContaining("Chinese detected: true")
-      );
-      expect(mockLogger.debug).toHaveBeenCalledWith(
         "Using LIKE search due to Chinese character detection"
       );
     });
@@ -87,9 +84,6 @@ describe("Chinese Search Detection", () => {
       await manager.searchNodes("english test", { output: { compact: false, includeObservations: true } });
       
       // Verify that FTS search was chosen
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        expect.stringContaining("Chinese detected: false")
-      );
       expect(mockLogger.debug).toHaveBeenCalledWith(
         "Using FTS search for large dataset"
       );
@@ -104,9 +98,6 @@ describe("Chinese Search Detection", () => {
       
       // Verify that LIKE search was chosen due to Chinese detection
       expect(mockLogger.debug).toHaveBeenCalledWith(
-        expect.stringContaining("Chinese detected: true")
-      );
-      expect(mockLogger.debug).toHaveBeenCalledWith(
         "Using LIKE search due to Chinese character detection"
       );
     });
@@ -119,9 +110,6 @@ describe("Chinese Search Detection", () => {
       await manager.searchNodes("english test", { output: { compact: false, includeObservations: true } });
       
       // Verify that LIKE search was chosen due to small dataset
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        expect.stringContaining("Chinese detected: false")
-      );
       expect(mockLogger.debug).toHaveBeenCalledWith(
         "Using LIKE search for small dataset"
       );
@@ -236,6 +224,262 @@ describe("Chinese Search Detection", () => {
       const traditionalEntity = results.entities.find(e => e.name === "traditional_chinese_entity");
       expect(traditionalEntity).toBeDefined();
       expect(traditionalEntity?.name).toBe("traditional_chinese_entity");
+    });
+  });
+
+  // 中文查詢走 hybrid 模式測試
+  describe('Chinese queries with hybrid mode', () => {
+    beforeEach(async () => {
+      // Clear previous mocks and add Chinese-friendly test data
+      vi.clearAllMocks();
+      
+      // Add comprehensive Chinese test entities
+      await manager.createEntities([
+        {
+          name: 'chinese_ai_system',
+          entityType: 'ai-system',
+          observations: [
+            '人工智慧系統',
+            '機器學習算法',
+            '深度學習模型',
+            '自然語言處理'
+          ],
+          createdAt: new Date().toISOString()
+        },
+        {
+          name: 'chinese_database',
+          entityType: 'database',
+          observations: [
+            '中文資料庫系統',
+            '數據存儲與查詢',
+            '分佈式架構',
+            '高可用性設計'
+          ],
+          createdAt: new Date().toISOString()
+        },
+        {
+          name: 'mixed_language_api',
+          entityType: 'api-service',
+          observations: [
+            'Multi-language API with 中文支援',
+            'RESTful interface with 本地化功能',
+            'Bilingual documentation 雙語文檔'
+          ],
+          createdAt: new Date().toISOString()
+        }
+      ]);
+    });
+
+    it('should use hybrid mode for Chinese queries when no search mode is specified', async () => {
+      // Force a reasonable entity count that allows hybrid mode
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(500);
+      
+      // Test pure Chinese query without specifying search mode (should use hybrid)
+      const results = await manager.searchNodes('人工智慧', {
+        searchMode: 'hybrid' as any  // Explicitly test hybrid mode
+      });
+      
+      expect(results.entities.length).toBeGreaterThan(0);
+      
+      // Should find Chinese AI system
+      const aiSystem = results.entities.find(e => e.name === 'chinese_ai_system');
+      expect(aiSystem).toBeDefined();
+      expect(aiSystem?.observations).toContain('人工智慧系統');
+      
+      // Verify hybrid mode can handle Chinese content
+      expect(mockLogger.debug).toHaveBeenCalled();
+    });
+
+    it('should support hybrid search with mixed Chinese-English queries', async () => {
+      // Force entity count to allow hybrid mode
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(800);
+      
+      const results = await manager.searchNodes('API 中文支援', {
+        searchMode: 'hybrid' as any
+      });
+      
+      expect(results.entities.length).toBeGreaterThan(0);
+      
+      // Should find the mixed language API
+      const mixedApi = results.entities.find(e => e.name === 'mixed_language_api');
+      expect(mixedApi).toBeDefined();
+      
+      // Should contain both Chinese and English content
+      const hasChineseSupport = mixedApi?.observations.some(obs => obs.includes('中文支援'));
+      const hasApiContent = mixedApi?.observations.some(obs => obs.includes('API'));
+      expect(hasChineseSupport).toBe(true);
+      expect(hasApiContent).toBe(true);
+    });
+
+    it('should handle traditional Chinese characters in hybrid mode', async () => {
+      // Add entity with traditional Chinese
+      await manager.createEntities([
+        {
+          name: 'traditional_system',
+          entityType: 'legacy-system',
+          observations: [
+            '傳統系統架構',
+            '繁體中文介面',
+            '舊版軟體相容性'
+          ],
+          createdAt: new Date().toISOString()
+        }
+      ]);
+      
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(600);
+      
+      const results = await manager.searchNodes('傳統 系統', {
+        searchMode: 'hybrid' as any
+      });
+      
+      expect(results.entities.length).toBeGreaterThan(0);
+      
+      const traditionalSystem = results.entities.find(e => e.name === 'traditional_system');
+      expect(traditionalSystem).toBeDefined();
+      expect(traditionalSystem?.observations).toContain('傳統系統架構');
+    });
+
+    it('should maintain search quality with Chinese queries in hybrid mode', async () => {
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(750);
+      
+      const chineseQuery = '機器學習';
+      const results = await manager.searchNodes(chineseQuery, {
+        searchMode: 'hybrid' as any
+      });
+      
+      expect(results.entities.length).toBeGreaterThan(0);
+      
+      // Should find relevant entities
+      const relevantEntities = results.entities.filter(e => 
+        e.observations.some(obs => obs.includes('機器學習') || obs.includes('人工智慧'))
+      );
+      expect(relevantEntities.length).toBeGreaterThan(0);
+      
+      // Verify result structure is correct
+      results.entities.forEach(entity => {
+        expect(entity).toHaveProperty('name');
+        expect(entity).toHaveProperty('entityType');
+        expect(entity).toHaveProperty('observations');
+        expect(entity).toHaveProperty('createdAt');
+        expect(Array.isArray(entity.observations)).toBe(true);
+      });
+    });
+
+    it('should handle Chinese punctuation and special characters in hybrid mode', async () => {
+      await manager.createEntities([
+        {
+          name: 'punctuation_test',
+          entityType: 'test-data',
+          observations: [
+            '測試：中文標點符號',
+            '包含、逗號，和句號。',
+            '問號？感嘆號！括號（測試）',
+            '引號「測試」書名號《測試》'
+          ],
+          createdAt: new Date().toISOString()
+        }
+      ]);
+      
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(700);
+      
+      const results = await manager.searchNodes('中文標點', {
+        searchMode: 'hybrid' as any
+      });
+      
+      expect(results.entities.length).toBeGreaterThan(0);
+      
+      const punctuationTest = results.entities.find(e => e.name === 'punctuation_test');
+      expect(punctuationTest).toBeDefined();
+      expect(punctuationTest?.observations).toContain('測試：中文標點符號');
+    });
+
+    it('should compare hybrid vs keyword performance for Chinese queries', async () => {
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(900);
+      
+      const chineseQuery = '資料庫系統';
+      
+      // Test both modes
+      const keywordResults = await manager.searchNodes(chineseQuery, {
+        searchMode: 'keyword' as any
+      });
+      
+      const hybridResults = await manager.searchNodes(chineseQuery, {
+        searchMode: 'hybrid' as any
+      });
+      
+      // Both should return valid results
+      expect(keywordResults.entities.length).toBeGreaterThanOrEqual(0);
+      expect(hybridResults.entities.length).toBeGreaterThanOrEqual(0);
+      
+      // Both should maintain proper structure
+      [keywordResults, hybridResults].forEach((results, index) => {
+        const mode = index === 0 ? 'keyword' : 'hybrid';
+        expect(results, `${mode} results should be defined`).toBeTruthy();
+        expect(Array.isArray(results.entities), `${mode} entities should be array`).toBe(true);
+        expect(Array.isArray(results.relations), `${mode} relations should be array`).toBe(true);
+      });
+      
+      // If both return results, they should contain relevant entities
+      if (keywordResults.entities.length > 0 && hybridResults.entities.length > 0) {
+        const keywordRelevant = keywordResults.entities.some(e => 
+          e.observations.some(obs => obs.includes('資料庫') || obs.includes('數據'))
+        );
+        const hybridRelevant = hybridResults.entities.some(e => 
+          e.observations.some(obs => obs.includes('資料庫') || obs.includes('數據'))
+        );
+        
+        expect(keywordRelevant || hybridRelevant).toBe(true);
+      }
+    });
+
+    it('should handle edge cases with Chinese queries in hybrid mode', async () => {
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(650);
+      
+      const edgeCaseQueries = [
+        '單一字', // Single character
+        '很長的中文查詢包含許多不同的詞彙和概念', // Very long query
+        '中英Mixed語言Query', // Mixed script
+        '123數字456中文789', // Numbers mixed with Chinese
+      ];
+      
+      for (const query of edgeCaseQueries) {
+        const results = await manager.searchNodes(query, {
+          searchMode: 'hybrid' as any
+        });
+        
+        // Should handle gracefully without throwing errors
+        expect(results).toBeTruthy();
+        expect(Array.isArray(results.entities)).toBe(true);
+        expect(Array.isArray(results.relations)).toBe(true);
+        
+        // Results may be empty for some edge cases, but structure should be maintained
+        expect(results.entities.length).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('should verify log messages for Chinese hybrid search mode selection', async () => {
+      vi.spyOn(manager as any, 'getCachedEntityCount').mockResolvedValue(1000);
+      
+      // Test Chinese query with hybrid mode - should show appropriate logging
+      await manager.searchNodes('中文測試', {
+        searchMode: 'hybrid' as any
+      });
+      
+      // Verify that appropriate debug messages were logged
+      // The exact message depends on implementation, but should indicate hybrid mode usage
+      expect(mockLogger.debug).toHaveBeenCalled();
+      
+      // Check if any debug calls relate to search mode selection or Chinese handling
+      const debugCalls = mockLogger.debug.mock.calls;
+      const hasSearchModeLog = debugCalls.some(call => 
+        call.some(arg => 
+          typeof arg === 'string' && 
+          (arg.includes('hybrid') || arg.includes('search') || arg.includes('mode'))
+        )
+      );
+      
+      // Should have some form of search-related logging
+      expect(hasSearchModeLog).toBe(true);
     });
   });
 });

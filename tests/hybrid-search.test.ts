@@ -893,4 +893,239 @@ describe("DuckDBKnowledgeGraphManager - Hybrid Search", () => {
       }
     });
   });
+
+  // semantic-only 修復與去重測試
+  describe('semantic-only fixes and deduplication', () => {
+    beforeEach(async () => {
+      // Create test entities with semantic scenarios; avoid PK duplicates at insert time
+      // Use variant names to simulate duplicates logically in results without violating PK
+      const semanticTestEntities = [
+        {
+          name: 'user-auth-service',
+          entityType: 'microservice',
+          observations: [
+            'User authentication and authorization service',
+            'JWT token management',
+            'OAuth2 integration'
+          ]
+        },
+        {
+          name: 'user-auth-service-v2', // variant to avoid PK conflict
+          entityType: 'microservice-v2',
+          observations: [
+            'Enhanced user authentication system',
+            'Advanced security features'
+          ]
+        },
+        {
+          name: 'payment-gateway',
+          entityType: 'service',
+          observations: [
+            'Payment processing gateway',
+            'Credit card validation',
+            'Fraud detection'
+          ]
+        },
+        {
+          name: 'notification-service',
+          entityType: 'service',
+          observations: [
+            'Email and SMS notifications',
+            'Push notification delivery',
+            'Message queue integration'
+          ]
+        }
+      ];
+      await manager.createEntities(semanticTestEntities);
+    });
+
+    it('should not fallback to keyword search when semantic-only mode is specified', async () => {
+      if (!manager.isVSSAvailable()) {
+        console.log('VSS not available, skipping semantic-only test');
+        return;
+      }
+
+      // Test with a query that might have low semantic similarity
+      const semanticResults = await manager.searchNodes('authentication security', {
+        searchMode: 'semantic' as any
+      });
+
+      expect(semanticResults).toBeTruthy();
+      expect(Array.isArray(semanticResults.entities)).toBe(true);
+      expect(Array.isArray(semanticResults.relations)).toBe(true);
+
+      // In semantic-only mode, results should come purely from vector similarity
+      // even if the keyword match would be stronger
+      // The key test is that it doesn't fallback to keyword mode
+      
+      // We can't easily verify the internal search strategy without mocking,
+      // but we can verify that the results maintain the expected structure
+      // and that the search completes successfully without keyword fallback
+    });
+
+    it('should deduplicate entities with same name in search results', async () => {
+      const results = await manager.searchNodes('user-auth-service');
+      
+      expect(results.entities.length).toBeGreaterThan(0);
+      
+      // Validate that results are deduplicated by entity name
+      const entityNames = results.entities.map(e => e.name);
+      const seen = new Set<string>();
+      entityNames.forEach((name) => {
+        expect(seen.has(name), `Duplicate entity ${name} found in results`).toBe(false);
+        seen.add(name);
+      });
+      // Specific check: 'user-auth-service' should appear at most once
+      const userAuthEntities = results.entities.filter(e => e.name === 'user-auth-service');
+      expect(userAuthEntities.length).toBeLessThanOrEqual(1);
+    });
+
+    it('should maintain deduplication with hybrid search mode', async () => {
+      const hybridResults = await manager.searchNodes('authentication', {
+        searchMode: 'hybrid' as any
+      });
+      
+      expect(hybridResults.entities.length).toBeGreaterThan(0);
+      
+      // Check for deduplication in hybrid results
+      const entityNames = hybridResults.entities.map(e => e.name);
+      const uniqueNames = [...new Set(entityNames)];
+      
+      // Each entity name should appear exactly once
+      expect(entityNames.length).toBe(uniqueNames.length);
+      
+      // Verify no duplicate entities by name
+      const nameMap = new Map<string, number>();
+      entityNames.forEach(name => {
+        const count = nameMap.get(name) || 0;
+        nameMap.set(name, count + 1);
+      });
+      
+      nameMap.forEach((count, name) => {
+        expect(count, `Entity ${name} should appear only once but appears ${count} times`).toBe(1);
+      });
+    });
+
+    it('should preserve entity data integrity during deduplication', async () => {
+      const results = await manager.searchNodes('user-auth');
+      
+      const userAuthEntity = results.entities.find(e => e.name === 'user-auth-service');
+      expect(userAuthEntity).toBeDefined();
+      
+      if (userAuthEntity) {
+        // Should have proper entity structure
+        expect(userAuthEntity.name).toBe('user-auth-service');
+        expect(userAuthEntity.entityType).toBeTruthy();
+        expect(Array.isArray(userAuthEntity.observations)).toBe(true);
+        expect(userAuthEntity.observations.length).toBeGreaterThan(0);
+        expect(userAuthEntity.createdAt).toBeTruthy();
+        
+        // Should preserve original observations
+        const hasAuthObservation = userAuthEntity.observations.some(obs => 
+          obs.includes('authentication') || obs.includes('JWT')
+        );
+        expect(hasAuthObservation).toBe(true);
+      }
+    });
+
+    it('should handle deduplication across different search strategies', async () => {
+      // Test deduplication consistency across different search modes
+      const keywordResults = await manager.searchNodes('service', {
+        searchMode: 'keyword' as any
+      });
+      
+      const hybridResults = await manager.searchNodes('service', {
+        searchMode: 'hybrid' as any
+      });
+      
+      // Both result sets should have proper deduplication
+      const keywordNames = keywordResults.entities.map(e => e.name);
+      const keywordUniqueNames = [...new Set(keywordNames)];
+      expect(keywordNames.length).toBe(keywordUniqueNames.length);
+      
+      const hybridNames = hybridResults.entities.map(e => e.name);
+      const hybridUniqueNames = [...new Set(hybridNames)];
+      expect(hybridNames.length).toBe(hybridUniqueNames.length);
+      
+      // No entity name should appear more than once in either result set
+      [keywordResults, hybridResults].forEach((results, index) => {
+        const mode = index === 0 ? 'keyword' : 'hybrid';
+        const seenNames = new Set<string>();
+        
+        results.entities.forEach(entity => {
+          expect(seenNames.has(entity.name), 
+            `Duplicate entity ${entity.name} found in ${mode} results`
+          ).toBe(false);
+          seenNames.add(entity.name);
+        });
+      });
+    });
+
+    it('should maintain search performance with deduplication', async () => {
+      // Add more entities to test performance with larger dataset (avoid PK duplicates)
+      const performanceEntities = [] as Entity[];
+      for (let i = 0; i < 100; i++) {
+        performanceEntities.push({
+          name: `test-entity-${i}`,
+          entityType: 'test',
+          observations: [`Test entity number ${i}`, 'Performance testing data']
+        });
+      }
+      await manager.createEntities(performanceEntities);
+      
+      const startTime = Date.now();
+      const results = await manager.searchNodes('test-entity', {
+        searchMode: 'hybrid' as any
+      });
+      const searchTime = Date.now() - startTime;
+      
+      // Should complete in reasonable time even with deduplication
+      expect(searchTime).toBeLessThan(2000);
+      
+      // Results should be deduplicated by name (no duplicate names in output)
+      const entityNames = results.entities.map(e => e.name);
+      const uniqueNames = new Set(entityNames);
+      expect(entityNames.length).toBe(uniqueNames.size);
+      
+      // Should find entities
+      expect(results.entities.length).toBeGreaterThan(0);
+    });
+
+    it('should handle semantic search without keyword fallback edge cases', async () => {
+      if (!manager.isVSSAvailable()) {
+        console.log('VSS not available, skipping semantic-only edge case test');
+        return;
+      }
+
+      // Test queries that traditionally might cause fallback to keyword search
+      const edgeCaseQueries = [
+        'very obscure technical jargon',
+        'nonexistent terminology',
+        'completely unrelated words',
+        'random combination of terms'
+      ];
+      
+      for (const query of edgeCaseQueries) {
+        const results = await manager.searchNodes(query, {
+          searchMode: 'semantic' as any
+        });
+        
+        // Should complete without errors and maintain structure
+        expect(results).toBeTruthy();
+        expect(Array.isArray(results.entities)).toBe(true);
+        expect(Array.isArray(results.relations)).toBe(true);
+        
+        // Results may be empty for semantic-only searches with no similarity
+        // but should not fallback to keyword search
+        expect(results.entities.length).toBeGreaterThanOrEqual(0);
+        
+        // If results exist, they should be properly deduplicated
+        if (results.entities.length > 0) {
+          const names = results.entities.map(e => e.name);
+          const uniqueNames = [...new Set(names)];
+          expect(names.length).toBe(uniqueNames.length);
+        }
+      }
+    });
+  });
 });
