@@ -34,8 +34,11 @@ ENTITY_COUNT_THRESHOLD=0 pnpm start
 # 執行測試
 pnpm test
 
-# 執行特定測試
-pnpm test -- tests/specific.test.ts
+# 執行特定測試（推薦寫法）
+pnpm test tests/specific.test.ts
+
+# 需要詳細輸出時
+pnpm test tests/specific.test.ts -- --reporter=verbose
 
 # 測試覆蓋率
 pnpm test:coverage
