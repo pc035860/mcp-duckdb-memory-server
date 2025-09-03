@@ -1410,52 +1410,19 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         return { entities: [], relations: [] };
       }
 
-      // Get related relations
+      // Get connection for database operations
       const conn = await this.getConnection();
-      // If we are not including observations, fetch count per entity to keep observationsCount accurate
-      const out2 = options?.output;
-      const incObs2 = out2?.includeObservations ?? !out2?.compact;
-      if (!incObs2) {
-        const countPlaceholders = entityNames.map(() => "?").join(",");
-        const countReader = await conn.runAndReadAll(
-          `SELECT entityName, COUNT(*) AS cnt FROM observations WHERE entityName IN (${countPlaceholders}) GROUP BY entityName`,
-          entityNames
-        );
-        const countRows = countReader.getRows();
-        const nameToCount = new Map<string, number>();
-        for (const row of countRows) {
-          nameToCount.set(row[0] as string, Number(row[1]));
-        }
-        entities = entities.map((e) => ({
-          ...e,
-          observationsCount: (e as any).observationsCount ?? (nameToCount.get(e.name) || 0),
-          observations: e.observations || [],
-        }));
-      }
-
-      // Hydrate observations if requested (before trimming)
+      
+      // Determine if observations should be included
       const output = options?.output;
-      // If observations are not included, fetch counts only to keep observationsCount accurate
-      const includeObservationsFlag = output?.includeObservations ?? !output?.compact;
-      if (!includeObservationsFlag && entityNames.length > 0) {
-        const countPlaceholders = entityNames.map(() => "?").join(",");
-        const countReader = await conn.runAndReadAll(
-          `SELECT entityName, COUNT(*) AS cnt FROM observations WHERE entityName IN (${countPlaceholders}) GROUP BY entityName`,
-          entityNames
-        );
-        const countRows = countReader.getRows();
-        const nameToCount = new Map<string, number>();
-        for (const row of countRows) {
-          nameToCount.set(row[0] as string, Number(row[1]));
-        }
-        entities = entities.map((e) => ({
-          ...e,
-          observationsCount: (e as any).observationsCount ?? (nameToCount.get(e.name) || 0),
-          observations: e.observations || [],
-        }));
-      }
-      const includeObservations = includeObservationsFlag;
-      if (includeObservationsFlag && entityNames.length > 0) {
+      const includeObservations = output?.includeObservations ?? !output?.compact;
+      
+      // Prepare observation count map (will be populated if needed)
+      let nameToObsCount: Map<string, number> | null = null;
+      
+      // Hydrate observations or fetch counts based on the flag
+      if (includeObservations && entityNames.length > 0) {
+        // Fetch full observations content
         const obsPlaceholders = entityNames.map(() => "?").join(",");
         const obsReader = await conn.runAndReadAll(
           `SELECT entityName, content FROM observations WHERE entityName IN (${obsPlaceholders}) ORDER BY created_at`,
@@ -1470,25 +1437,43 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
           list.push(content);
           nameToObs.set(name, list);
         }
+        // Also build count map from the observations we just fetched
+        nameToObsCount = new Map<string, number>();
+        for (const [name, obs] of nameToObs.entries()) {
+          nameToObsCount.set(name, obs.length);
+        }
+        // Set zero counts for entities without observations
+        for (const name of entityNames) {
+          if (!nameToObsCount.has(name)) {
+            nameToObsCount.set(name, 0);
+          }
+        }
         entities = entities.map((e) => ({
           ...e,
           observations: e.observations && e.observations.length > 0 ? e.observations : (nameToObs.get(e.name) || []),
+          observationsCount: nameToObsCount!.get(e.name) || 0,
         }));
-      } else if (!includeObservationsFlag && entityNames.length > 0) {
-        // Not hydrating observations: fetch counts only for accurate observationsCount in previews
+      } else if (!includeObservations && entityNames.length > 0) {
+        // Fetch observation counts only (single query for efficiency)
         const countPlaceholders = entityNames.map(() => "?").join(",");
         const countReader = await conn.runAndReadAll(
           `SELECT entityName, COUNT(*) AS cnt FROM observations WHERE entityName IN (${countPlaceholders}) GROUP BY entityName`,
           entityNames
         );
         const countRows = countReader.getRows();
-        const nameToCount = new Map<string, number>();
+        nameToObsCount = new Map<string, number>();
         for (const row of countRows) {
-          nameToCount.set(row[0] as string, Number(row[1]));
+          nameToObsCount.set(row[0] as string, Number(row[1]));
+        }
+        // Set zero counts for entities without observations
+        for (const name of entityNames) {
+          if (!nameToObsCount.has(name)) {
+            nameToObsCount.set(name, 0);
+          }
         }
         entities = entities.map((e) => ({
           ...e,
-          observationsCount: (e as any).observationsCount ?? (nameToCount.get(e.name) || 0),
+          observationsCount: nameToObsCount!.get(e.name) || 0,
           observations: e.observations || [],
         }));
       }
@@ -1521,21 +1506,24 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       const maxEntities = output?.maxEntities && output.maxEntities > 0 ? output.maxEntities : undefined;
       const limitedEntities = maxEntities ? entities.slice(0, maxEntities) : entities;
 
-      // Observations trimming (compact or explicitly exclude observations)
-      const includeObservations2 = output?.includeObservations ?? !output?.compact;
+      // Observations trimming
       const maxObs = output?.maxObservationsPerEntity ?? undefined;
       const snippetChars = output?.snippetChars ?? undefined;
       const trimmedEntities = limitedEntities.map((e) => {
-        const total = (typeof (e as any).observationsCount === 'number')
-          ? (e as any).observationsCount as number
-          : (e.observations?.length || 0);
-        if (!includeObservations2) {
+        // observationsCount should always be set by now
+        const total = (e as any).observationsCount || 0;
+        
+        if (!includeObservations) {
+          // When observations are not included, return empty arrays with counts
           return { ...e, observations: [], observationsCount: total, observationsPreview: [], omittedObservations: total };
         }
+        
         if (!maxObs && !snippetChars) {
-          // Ensure observations is always an array for consistency
+          // Return full observations without trimming
           return { ...e, observations: e.observations || [], observationsCount: total };
         }
+        
+        // Apply trimming and/or snippet extraction
         const preview = (e.observations || [])
           .slice(0, maxObs ?? total)
           .map((t) => (snippetChars && typeof t === 'string' && t.length > snippetChars ? t.slice(0, snippetChars) : t));
@@ -2590,34 +2578,56 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
       }
     }
     
-    const reader = await conn.runAndReadAll(`
-      SELECT DISTINCT name, entityType, created_at
-      FROM entity_search_view
-      WHERE ${whereConditions}${scopeCondition}${timeCondition}
-      ORDER BY 
-        -- Prioritize exact name matches
-        CASE WHEN name ILIKE ? THEN 1
-             WHEN entityType ILIKE ? THEN 2
-             ELSE 3 END,
-        created_at DESC
-      LIMIT 100
-    `, [...params, `%${query}%`, `%${query}%`]);
+    // Original query replaced by batch query below to avoid N+1 problem
     
-    const rows = reader.getRows();
+    // Use batch query with CTE to avoid N+1 problem
+    const batchSql = `
+      WITH filtered_entities AS (
+        SELECT DISTINCT name, entityType, created_at
+        FROM entities
+        WHERE (name ILIKE ? OR entityType ILIKE ? OR name IN (
+          SELECT DISTINCT entityName 
+          FROM observations 
+          WHERE content ILIKE ?
+        ))
+        ORDER BY 
+          CASE WHEN name ILIKE ? THEN 1
+               WHEN entityType ILIKE ? THEN 2
+               ELSE 3 END,
+          created_at DESC
+        LIMIT 100
+      ),
+      entity_observations AS (
+        SELECT entityName, 
+               string_agg(content, '|||' ORDER BY created_at) as observations_concat
+        FROM observations
+        GROUP BY entityName
+      )
+      SELECT fe.name, fe.entityType, fe.created_at,
+             COALESCE(eo.observations_concat, '') as observations_concat
+      FROM filtered_entities fe
+      LEFT JOIN entity_observations eo ON fe.name = eo.entityName
+      ORDER BY 
+        CASE WHEN fe.name ILIKE ? THEN 1
+             WHEN fe.entityType ILIKE ? THEN 2
+             ELSE 3 END,
+        fe.created_at DESC
+    `;
+    
+    const batchParams = [...params, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`];
+    
+    const batchReader = await conn.runAndReadAll(batchSql, batchParams);
+    const rows = batchReader.getRows();
     const entities: Entity[] = [];
     
     for (const row of rows) {
       const name = row[0] as string;
       const entityType = row[1] as string;
       const created_at = row[2];
+      const observationsConcat = row[3] as string | null;
       
-      // Get observations for this entity
-      const obsReader = await conn.runAndReadAll(
-        "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
-        [name]
-      );
-      const obsRows = obsReader.getRows();
-      const observations = obsRows.map(obsRow => obsRow[0] as string);
+      // Parse observations from concatenated string
+      const observations = observationsConcat && observationsConcat.trim() !== '' ? observationsConcat.split('|||') : [];
       
       entities.push({
         name,
@@ -2983,27 +2993,51 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         }
       }
       
-      const queryParams = [...params, ...scopeParams, ...timeParams, `%${searchTerms[0]}%`, `%${searchTerms[0]}%`];
+      // Build base parameters for search terms, scope, and time range
+      const baseParams = [...params, ...scopeParams, ...timeParams];
       
-      const sql = `
-        SELECT DISTINCT e.name, e.entityType, e.created_at
-        FROM entities e
-        LEFT JOIN observations o ON e.name = o.entityName
-        WHERE (${whereConditions})
-        ${scopeCondition}
-        ${timeCondition}
+      // Use batch query with CTE to avoid N+1 problem
+      const batchSql = `
+        WITH filtered_entities AS (
+          SELECT DISTINCT e.name, e.entityType, e.created_at
+          FROM entities e
+          LEFT JOIN observations o ON e.name = o.entityName
+          WHERE (${whereConditions})
+          ${scopeCondition}
+          ${timeCondition}
+          ORDER BY 
+            -- Prioritize exact name matches
+            CASE WHEN e.name ILIKE ? THEN 1
+                 WHEN e.entityType ILIKE ? THEN 2
+                 ELSE 3 END,
+            e.created_at DESC
+          LIMIT 500
+        ),
+        entity_observations AS (
+          SELECT entityName, 
+                 string_agg(content, '|||' ORDER BY created_at) as observations_concat
+          FROM observations
+          GROUP BY entityName
+        )
+        SELECT fe.name, fe.entityType, fe.created_at,
+               COALESCE(eo.observations_concat, '') as observations_concat
+        FROM filtered_entities fe
+        LEFT JOIN entity_observations eo ON fe.name = eo.entityName
         ORDER BY 
           -- Prioritize exact name matches
-          CASE WHEN e.name ILIKE ? THEN 1
-               WHEN e.entityType ILIKE ? THEN 2
+          CASE WHEN fe.name ILIKE ? THEN 1
+               WHEN fe.entityType ILIKE ? THEN 2
                ELSE 3 END,
-          e.created_at DESC
-        LIMIT 500
+          fe.created_at DESC
       `;
       
-      this.logger.debug('Executing SQL:', { sql, params: queryParams });
+      // Build complete parameters: base params + 2 for first CTE prioritization + 2 for final ORDER BY prioritization
+      const exactPattern = `%${searchTerms[0]}%`;
+      const batchParams = [...baseParams, exactPattern, exactPattern, exactPattern, exactPattern];
       
-      const reader = await conn.runAndReadAll(sql, queryParams);
+      this.logger.debug('Executing batch SQL:', { sql: batchSql, params: batchParams });
+      
+      const reader = await conn.runAndReadAll(batchSql, batchParams);
       
       const rows = reader.getRows();
       const entities: Entity[] = [];
@@ -3012,14 +3046,10 @@ export class DuckDBKnowledgeGraphManager implements KnowledgeGraphManagerInterfa
         const name = row[0] as string;
         const entityType = row[1] as string;
         const created_at = row[2];
+        const observationsConcat = row[3] as string | null;
         
-        // Get observations for this entity
-        const obsReader = await conn.runAndReadAll(
-          "SELECT content FROM observations WHERE entityName = ? ORDER BY created_at",
-          [name]
-        );
-        const obsRows = obsReader.getRows();
-        const observations = obsRows.map(obsRow => obsRow[0] as string);
+        // Parse observations from concatenated string
+        const observations = observationsConcat && observationsConcat.trim() !== '' ? observationsConcat.split('|||') : [];
         
         entities.push({
           name,

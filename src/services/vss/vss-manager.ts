@@ -30,7 +30,7 @@ export class DuckDBVSSManager implements IVSSManager {
     totalLatency: 0,
   };
   // If true, send embedding as string parameter ("[v1,...]") to work around binder issues
-  private fallbackToStringParam: boolean = false;
+  private fallbackToStringParam: boolean = true;
 
   constructor(
     connection: DuckDBConnection,
